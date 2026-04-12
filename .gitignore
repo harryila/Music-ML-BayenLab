@@ -1,0 +1,24 @@
+# Virtual environments
+venv/
+venv311/
+venv_mt3/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+
+# Model checkpoints (too large for git)
+MIDI2ScoreTransformer/checkpoints/
+mt3/checkpoints/
+
+# Output artifacts (regenerable)
+outputs/
+midi/
+
+# OS
+.DS_Store
+
+# IDE
+.cursor/
