@@ -9,13 +9,19 @@ __pycache__/
 *.pyo
 *.egg-info/
 
-# Model checkpoints (too large for git)
+# Model checkpoints (too large for git — download separately)
 MIDI2ScoreTransformer/checkpoints/
 mt3/checkpoints/
+hFT-Transformer/checkpoint/
 
 # Output artifacts (regenerable)
 outputs/
 midi/
+
+# Benchmark MIDI files (from MAESTRO, copyrighted — download via catalog.json)
+benchmark/*/*.midi
+benchmark/*/path_b/
+benchmark/*/path_c/
 
 # OS
 .DS_Store

@@ -22,36 +22,50 @@ import sys
 from pathlib import Path
 from typing import Optional
 
+import pretty_midi
+
 log = logging.getLogger("transcribe")
 
 SUPPORTED_AUDIO = {".wav", ".mp3", ".ogg", ".flac", ".m4a"}
 SUPPORTED_OUTPUT = {".pdf", ".png"}
-TRANSCRIBERS = ["basic-pitch", "mt3"]
+TRANSCRIBERS = ["basic-pitch", "mt3", "transkun", "hft"]
 BACKENDS = ["music21", "musescore", "transformer"]
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 TRANSFORMER_DIR = SCRIPT_DIR / "MIDI2ScoreTransformer"
 CHECKPOINT_PATH = TRANSFORMER_DIR / "checkpoints" / "MIDI2ScoreTF.ckpt"
+HFT_DIR = SCRIPT_DIR / "hFT-Transformer"
+HFT_CONFIG = HFT_DIR / "corpus" / "config.json"
+HFT_CHECKPOINT = HFT_DIR / "checkpoint" / "MAESTRO-V3" / "model_016_003.pkl"
 
 
 # ---------------------------------------------------------------------------
 # Phase 1: Audio → MIDI
 # ---------------------------------------------------------------------------
 
-def audio_to_midi_basic_pitch(audio_path: Path, midi_path: Path) -> int:
+def audio_to_midi_basic_pitch(audio_path: Path, midi_path: Path,
+                              onset_threshold: float = 0.5,
+                              frame_threshold: float = 0.3) -> int:
     """Run Basic Pitch inference and write a MIDI file."""
     log.info("[1/3] Audio → MIDI (Basic Pitch)")
     log.info("      Input:  %s", audio_path)
+    log.info("      Thresholds: onset=%.2f, frame=%.2f", onset_threshold, frame_threshold)
 
     _root = logging.getLogger()
     _prev_level = _root.level
     _root.setLevel(logging.ERROR)
 
-    import io, contextlib
+    import io, contextlib, warnings
     with contextlib.redirect_stderr(io.StringIO()), \
-         contextlib.redirect_stdout(io.StringIO()):
+         contextlib.redirect_stdout(io.StringIO()), \
+         warnings.catch_warnings():
+        warnings.filterwarnings("ignore")
         from basic_pitch.inference import predict
-        model_output, midi_data, note_events = predict(str(audio_path))
+        model_output, midi_data, note_events = predict(
+            str(audio_path),
+            onset_threshold=onset_threshold,
+            frame_threshold=frame_threshold,
+        )
 
     _root.setLevel(_prev_level)
     midi_data.write(str(midi_path))
@@ -75,15 +89,180 @@ def audio_to_midi_mt3(audio_path: Path, midi_path: Path) -> int:
     return n_notes
 
 
-def audio_to_midi(audio_path: Path, midi_path: Path, transcriber: str = "basic-pitch") -> int:
-    """Dispatch to the chosen transcriber."""
+def audio_to_midi_transkun(audio_path: Path, midi_path: Path) -> int:
+    """Run Transkun inference and write a MIDI file."""
+    log.info("[1/3] Audio → MIDI (Transkun)")
+    log.info("      Input:  %s", audio_path)
+
+    import pkg_resources
+    import torch
+    import numpy as np
+    import moduleconf
+    from transkun.transcribe import readAudio, writeMidi
+
+    default_weight = pkg_resources.resource_filename("transkun", "pretrained/2.0.pt")
+    default_conf = pkg_resources.resource_filename("transkun", "pretrained/2.0.conf")
+
+    device = "cpu"
+    log.info("      Device: %s", device)
+
+    conf_manager = moduleconf.parseFromFile(default_conf)
+    TransKun = conf_manager["Model"].module.TransKun
+    conf = conf_manager["Model"].config
+
+    checkpoint = torch.load(default_weight, map_location=device)
+    model = TransKun(conf=conf).to(device)
+    if "best_state_dict" in checkpoint:
+        model.load_state_dict(checkpoint["best_state_dict"], strict=False)
+    else:
+        model.load_state_dict(checkpoint["state_dict"], strict=False)
+    model.eval()
+
+    fs, audio = readAudio(str(audio_path))
+    if fs != model.fs:
+        import soxr
+        audio = soxr.resample(audio, fs, model.fs)
+
+    x = torch.from_numpy(audio).to(device)
+    with torch.no_grad():
+        notes_est = model.transcribe(x)
+
+    output_midi = writeMidi(notes_est)
+    output_midi.write(str(midi_path))
+
+    n_notes = len([n for n in notes_est if n.pitch > 0])
+    log.info("      Notes detected: %d", n_notes)
+    log.info("      MIDI saved: %s", midi_path)
+    return n_notes
+
+
+def audio_to_midi_hft(audio_path: Path, midi_path: Path) -> int:
+    """Run hFT-Transformer inference and write a MIDI file."""
+    log.info("[1/3] Audio → MIDI (hFT-Transformer)")
+    log.info("      Input:  %s", audio_path)
+
+    if not HFT_DIR.is_dir():
+        log.error("hFT-Transformer repo not found at %s", HFT_DIR)
+        sys.exit(1)
+    if not HFT_CHECKPOINT.is_file():
+        log.error("hFT checkpoint not found at %s", HFT_CHECKPOINT)
+        sys.exit(1)
+
+    import json
+    import pickle
+    import torch
+    import numpy as np
+
+    hft_root = str(HFT_DIR)
+    hft_model_dir = str(HFT_DIR / "model")
+    if hft_root not in sys.path:
+        sys.path.insert(0, hft_root)
+    if hft_model_dir not in sys.path:
+        sys.path.insert(0, hft_model_dir)
+    from amt import AMT
+
+    with open(str(HFT_CONFIG), "r") as f:
+        config = json.load(f)
+    config["input"]["min_value"] = float(np.log(config["feature"]["log_offset"]))
+
+    amtobj = AMT(config, model_path=None)
+    import io
+    class CPUUnpickler(pickle.Unpickler):
+        def find_class(self, module, name):
+            if module == "torch.storage" and name == "_load_from_bytes":
+                return lambda b: torch.load(io.BytesIO(b), map_location="cpu",
+                                            weights_only=False)
+            return super().find_class(module, name)
+    with open(str(HFT_CHECKPOINT), "rb") as f:
+        model = CPUUnpickler(f).load()
+    amtobj.model = model.to(amtobj.device)
+    amtobj.model.eval()
+    # Override hardcoded CUDA device refs in model submodules
+    for module in amtobj.model.modules():
+        if hasattr(module, "device") and isinstance(module.device, str):
+            module.device = amtobj.device
+    log.info("      Device: %s", amtobj.device)
+
+    a_feature = amtobj.wav2feature(str(audio_path))
+    log.info("      Feature frames: %d", a_feature.shape[0])
+
+    out = amtobj.transcript(a_feature, mode="combination")
+    onset_A, offset_A, mpe_A, vel_A = out[0], out[1], out[2], out[3]
+    onset_B, offset_B, mpe_B, vel_B = out[4], out[5], out[6], out[7]
+
+    a_note = amtobj.mpe2note(
+        a_onset=onset_B, a_offset=offset_B, a_mpe=mpe_B, a_velocity=vel_B,
+        thred_onset=0.5, thred_offset=0.5, thred_mpe=0.5,
+        mode_velocity="ignore_zero", mode_offset="shorter",
+    )
+
+    amtobj.note2midi(a_note, str(midi_path))
+
+    n_notes = len(a_note)
+    log.info("      Notes detected: %d", n_notes)
+    log.info("      MIDI saved: %s", midi_path)
+    return n_notes, a_note
+
+
+def audio_to_midi(audio_path: Path, midi_path: Path, transcriber: str = "basic-pitch",
+                  onset_threshold: float = 0.5, frame_threshold: float = 0.3):
+    """Dispatch to the chosen transcriber. Returns (n_notes, raw_notes_or_None)."""
     midi_path.parent.mkdir(parents=True, exist_ok=True)
     if transcriber == "basic-pitch":
-        return audio_to_midi_basic_pitch(audio_path, midi_path)
+        return audio_to_midi_basic_pitch(audio_path, midi_path,
+                                         onset_threshold=onset_threshold,
+                                         frame_threshold=frame_threshold), None
     elif transcriber == "mt3":
-        return audio_to_midi_mt3(audio_path, midi_path)
+        return audio_to_midi_mt3(audio_path, midi_path), None
+    elif transcriber == "transkun":
+        return audio_to_midi_transkun(audio_path, midi_path), None
+    elif transcriber == "hft":
+        return audio_to_midi_hft(audio_path, midi_path)
     else:
         raise ValueError(f"Unknown transcriber: {transcriber}")
+
+
+def filter_midi(midi_path: Path, min_duration_ms: float = 50,
+                min_velocity: int = 10, pitch_range: tuple = (21, 108),
+                debounce_ms: float = 30) -> int:
+    """Remove spurious notes from a MIDI file in-place.
+
+    Returns the number of notes removed.
+    """
+    pm = pretty_midi.PrettyMIDI(str(midi_path))
+    total_before = sum(len(inst.notes) for inst in pm.instruments)
+
+    for inst in pm.instruments:
+        filtered = []
+        for note in inst.notes:
+            duration_ms = (note.end - note.start) * 1000
+            if duration_ms < min_duration_ms:
+                continue
+            if note.velocity < min_velocity:
+                continue
+            if note.pitch < pitch_range[0] or note.pitch > pitch_range[1]:
+                continue
+            filtered.append(note)
+
+        filtered.sort(key=lambda n: (n.pitch, n.start))
+        deduped = []
+        for note in filtered:
+            if deduped and deduped[-1].pitch == note.pitch:
+                gap_ms = (note.start - deduped[-1].start) * 1000
+                if gap_ms < debounce_ms:
+                    if note.velocity > deduped[-1].velocity:
+                        deduped[-1] = note
+                    continue
+            deduped.append(note)
+
+        inst.notes = deduped
+
+    total_after = sum(len(inst.notes) for inst in pm.instruments)
+    pm.write(str(midi_path))
+
+    removed = total_before - total_after
+    log.info("      MIDI filter: %d → %d notes (%d removed)", total_before, total_after, removed)
+    return removed
 
 
 # ---------------------------------------------------------------------------
@@ -116,18 +295,21 @@ def find_musescore() -> Optional[str]:
     return None
 
 
-def run_musescore(mscore_path: str, input_path: str, output_path: str) -> None:
-    """Run MuseScore in converter mode."""
+def run_musescore(mscore_path: str, input_path: str, output_path: str) -> bool:
+    """Run MuseScore in converter mode. Returns True on success."""
     env = os.environ.copy()
     if sys.platform == "linux":
         env["QT_QPA_PLATFORM"] = "offscreen"
-    subprocess.run(
+    result = subprocess.run(
         [mscore_path, "-o", output_path, input_path],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
         env=env,
-        check=True,
     )
+    if result.returncode != 0:
+        log.warning("      MuseScore CLI failed (exit code %d)", result.returncode)
+        return False
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -168,24 +350,29 @@ def backend_music21(midi_path: Path, output_path: Path) -> Path:
         env = environment.Environment()
         env["lilypondPath"] = lilypond_path
         try:
-            stem = str(output_path.with_suffix(""))
+            import tempfile
+            tmp_fd, tmp_path = tempfile.mkstemp(
+                suffix=output_path.suffix, dir=str(output_path.parent))
+            os.close(tmp_fd)
+            os.unlink(tmp_path)
+            tmp_stem = tmp_path.rsplit(".", 1)[0]
+
             devnull_fd = os.open(os.devnull, os.O_WRONLY)
             saved_stderr = os.dup(2)
             os.dup2(devnull_fd, 2)
             try:
-                written = Path(str(score.write(lily_fmt, fp=stem)))
+                written = Path(str(score.write(lily_fmt, fp=tmp_stem)))
             finally:
                 os.dup2(saved_stderr, 2)
                 os.close(devnull_fd)
                 os.close(saved_stderr)
-            if written != output_path and written.exists():
+            if written.exists():
                 written.rename(output_path)
-                written = output_path
-            ly_source = Path(stem)
-            if ly_source.exists() and ly_source.suffix != output_path.suffix:
+            ly_source = Path(tmp_stem)
+            if ly_source.exists():
                 ly_source.unlink()
-            log.info("      Output: %s", written)
-            return written
+            log.info("      Output: %s", output_path)
+            return output_path
         except Exception as exc:
             log.warning("      LilyPond rendering failed: %s", exc)
             log.warning("      Falling back to MusicXML export.")
@@ -211,21 +398,73 @@ def backend_musescore(midi_path: Path, output_path: Path) -> Path:
     log.info("[2/3] MIDI → Score + Render (MuseScore)")
     log.info("      MuseScore: %s", mscore)
 
-    run_musescore(mscore, str(midi_path), str(output_path))
-
-    if output_path.exists():
-        log.info("      Output: %s", output_path)
-        return output_path
-    else:
-        log.error("      MuseScore failed to produce output.")
+    if not run_musescore(mscore, str(midi_path), str(output_path)):
+        log.error("      MuseScore failed to render %s", midi_path)
         sys.exit(1)
+
+    log.info("      Output: %s", output_path)
+    return output_path
 
 
 # ---------------------------------------------------------------------------
 # Backend: MIDI2ScoreTransformer
 # ---------------------------------------------------------------------------
 
-def backend_transformer(midi_path: Path, output_path: Path) -> Path:
+def _fix_time_signatures(score, diagnostics: list):
+    """Override time signatures with the majority-predicted meter.
+
+    MIDI2ScoreTransformer's downbeat predictions can be noisy — e.g. the first
+    few measures may predict 3/4 while the rest correctly predict 4/4. This
+    function takes a majority vote over all predicted bar lengths and replaces
+    outlier time signatures.
+
+    NOTE: This assumes a single predominant time signature for the whole piece.
+    Pieces with genuine meter changes (Bartók, some Prokofiev, late Liszt)
+    would have intentional time signature changes overridden. Not solved here.
+    """
+    from music21 import meter
+    from collections import Counter
+
+    if not diagnostics:
+        return score
+
+    bar_lengths = [d["bar_length_ql"] for d in diagnostics]
+    rounded = [round(bl) for bl in bar_lengths]
+    majority_ql = Counter(rounded).most_common(1)[0][0]
+
+    if majority_ql <= 0:
+        return score
+
+    frac_map = {1: "1/4", 2: "2/4", 3: "3/4", 4: "4/4", 5: "5/4", 6: "6/4"}
+    if majority_ql not in frac_map:
+        return score
+
+    majority_ts_str = frac_map[majority_ql]
+    log.info("      Time sig fix: majority vote = %s (%d/%d measures)",
+             majority_ts_str,
+             rounded.count(majority_ql), len(rounded))
+
+    for part in score.parts:
+        first_measure = True
+        for m in part.getElementsByClass("Measure"):
+            existing = m.getElementsByClass("TimeSignature")
+            if first_measure:
+                if existing:
+                    if existing[0].ratioString != majority_ts_str:
+                        m.remove(existing[0])
+                        m.insert(0, meter.TimeSignature(majority_ts_str))
+                else:
+                    m.insert(0, meter.TimeSignature(majority_ts_str))
+                first_measure = False
+            else:
+                for ts in existing:
+                    if ts.ratioString != majority_ts_str:
+                        m.remove(ts)
+
+    return score
+
+
+def backend_transformer(midi_path: Path, output_path: Path, raw_notes: list = None) -> Path:
     if not TRANSFORMER_DIR.is_dir():
         log.error("MIDI2ScoreTransformer repo not found at %s", TRANSFORMER_DIR)
         log.error("Clone it: git clone https://github.com/TimFelixBeyer/MIDI2ScoreTransformer.git")
@@ -272,33 +511,38 @@ def backend_transformer(midi_path: Path, output_path: Path) -> Path:
     model.eval()
     model.to(device)
 
-    log.info("      Tokenizing MIDI...")
-    x = MultistreamTokenizer.tokenize_midi(str(midi_path))
+    if raw_notes is not None:
+        log.info("      Tokenizing notes directly (bypassing MIDI file)...")
+        x = MultistreamTokenizer.tokenize_notes(raw_notes)
+    else:
+        log.info("      Tokenizing MIDI...")
+        x = MultistreamTokenizer.tokenize_midi(str(midi_path))
 
     log.info("      Running inference (%d notes)...", x["pitch"].shape[0])
-    y_hat = infer(x, model, verbose=False, kv_cache=True)
+    y_hat = infer(x, model, verbose=False, kv_cache=True, overlap=128)
 
     log.info("      Decoding to score...")
-    mxl = MultistreamTokenizer.detokenize_mxl(y_hat)
+    diagnostics = []
+    mxl = MultistreamTokenizer.detokenize_mxl(y_hat, _diagnostics=diagnostics)
+    mxl = _fix_time_signatures(mxl, diagnostics)
     mxl = postprocess_score(mxl, inPlace=True)
 
     # Write MusicXML, then render to PDF/PNG with MuseScore
-    import tempfile
-    with tempfile.NamedTemporaryFile(suffix=".musicxml", delete=False) as tmp:
-        tmp_mxl = tmp.name
-    mxl.write("musicxml", fp=tmp_mxl)
+    mxl_path = output_path.with_suffix(".musicxml")
+    mxl.write("musicxml", fp=str(mxl_path))
+    log.info("      MusicXML saved: %s", mxl_path)
 
     log.info("[3/3] Score → Sheet Music (MuseScore)")
     log.info("      MuseScore: %s", mscore)
-    run_musescore(mscore, tmp_mxl, str(output_path))
-    os.unlink(tmp_mxl)
 
-    if output_path.exists():
+    if run_musescore(mscore, str(mxl_path), str(output_path)):
         log.info("      Output: %s", output_path)
         return output_path
     else:
-        log.error("      MuseScore rendering failed.")
-        sys.exit(1)
+        log.warning("      MuseScore could not render the score.")
+        log.warning("      MusicXML preserved at: %s", mxl_path)
+        log.warning("      Try opening it in MuseScore GUI, or use -b musescore instead.")
+        return mxl_path
 
 
 # ---------------------------------------------------------------------------
@@ -313,7 +557,16 @@ def parse_args(argv: Optional[list] = None) -> argparse.Namespace:
     parser.add_argument(
         "input",
         type=Path,
-        help="Path to input audio file (wav, mp3, ogg, flac, m4a)",
+        nargs="?",
+        default=None,
+        help="Path to input audio file (wav, mp3, ogg, flac, m4a). "
+             "Not required when --midi-input is used.",
+    )
+    parser.add_argument(
+        "--midi-input",
+        type=Path,
+        default=None,
+        help="Skip Phase 1 and use this MIDI file directly for Phase 2+3.",
     )
     parser.add_argument(
         "-o", "--output",
@@ -331,8 +584,22 @@ def parse_args(argv: Optional[list] = None) -> argparse.Namespace:
         "-t", "--transcriber",
         choices=TRANSCRIBERS,
         default="basic-pitch",
-        help="Audio-to-MIDI transcriber: basic-pitch (Spotify CNN) or "
-             "mt3 (Google T5 Transformer, requires venv_mt3). Default: basic-pitch.",
+        help="Audio-to-MIDI transcriber: basic-pitch (Spotify CNN), "
+             "mt3 (Google T5 Transformer, requires venv_mt3), "
+             "transkun (event-based, continuous timestamps), or "
+             "hft (hFT-Transformer, sub-frame precision). Default: basic-pitch.",
+    )
+    parser.add_argument(
+        "--onset-threshold",
+        type=float,
+        default=0.5,
+        help="Basic Pitch onset detection threshold (0-1). Higher = fewer false onsets. Default: 0.5.",
+    )
+    parser.add_argument(
+        "--frame-threshold",
+        type=float,
+        default=0.3,
+        help="Basic Pitch frame detection threshold (0-1). Higher = fewer phantom notes. Default: 0.3.",
     )
     parser.add_argument(
         "-b", "--backend",
@@ -349,39 +616,60 @@ def main(argv: Optional[list] = None) -> None:
     args = parse_args(argv)
 
     logging.basicConfig(level=logging.INFO, format="%(message)s")
-    import warnings
-    warnings.filterwarnings("ignore")
-
-    audio_path: Path = args.input
-    if not audio_path.is_file():
-        log.error("Input file not found: %s", audio_path)
-        sys.exit(1)
-    if audio_path.suffix.lower() not in SUPPORTED_AUDIO:
-        log.error(
-            "Unsupported audio format '%s'. Supported: %s",
-            audio_path.suffix, ", ".join(sorted(SUPPORTED_AUDIO)),
-        )
-        sys.exit(1)
 
     backend = args.backend
-    output_path: Path = args.output or (
-        SCRIPT_DIR / "outputs" / backend / (audio_path.stem + ".pdf")
-    )
+    skip_phase1 = args.midi_input is not None
+
+    raw_notes = None
+
+    if skip_phase1:
+        midi_path = args.midi_input
+        if not midi_path.is_file():
+            log.error("MIDI input file not found: %s", midi_path)
+            sys.exit(1)
+        output_path = args.output or (
+            SCRIPT_DIR / "outputs" / backend / (midi_path.stem + ".pdf")
+        )
+        log.info("Skipping Phase 1 — using existing MIDI: %s", midi_path)
+    else:
+        if args.input is None:
+            log.error("Either provide an audio file or use --midi-input.")
+            sys.exit(1)
+        audio_path: Path = args.input
+        if not audio_path.is_file():
+            log.error("Input file not found: %s", audio_path)
+            sys.exit(1)
+        if audio_path.suffix.lower() not in SUPPORTED_AUDIO:
+            log.error(
+                "Unsupported audio format '%s'. Supported: %s",
+                audio_path.suffix, ", ".join(sorted(SUPPORTED_AUDIO)),
+            )
+            sys.exit(1)
+
+        output_path = args.output or (
+            SCRIPT_DIR / "outputs" / backend / (audio_path.stem + ".pdf")
+        )
+        midi_path = args.keep_midi or output_path.with_name(audio_path.stem + ".mid")
+
+        # Phase 1: Audio → MIDI
+        transcriber = args.transcriber
+        raw_notes = None
+        try:
+            n_notes, raw_notes = audio_to_midi(
+                audio_path, midi_path, transcriber=transcriber,
+                onset_threshold=args.onset_threshold,
+                frame_threshold=args.frame_threshold)
+        except Exception as exc:
+            log.error("Audio → MIDI failed: %s", exc)
+            sys.exit(1)
+
+        filter_midi(midi_path)
+
     if output_path.suffix.lower() not in SUPPORTED_OUTPUT:
         log.error(
             "Unsupported output format '%s'. Supported: %s",
             output_path.suffix, ", ".join(sorted(SUPPORTED_OUTPUT)),
         )
-        sys.exit(1)
-
-    midi_path: Path = args.keep_midi or output_path.with_name(audio_path.stem + ".mid")
-
-    # Phase 1: Audio → MIDI
-    transcriber = args.transcriber
-    try:
-        audio_to_midi(audio_path, midi_path, transcriber=transcriber)
-    except Exception as exc:
-        log.error("Audio → MIDI failed: %s", exc)
         sys.exit(1)
 
     print()
@@ -397,7 +685,7 @@ def main(argv: Optional[list] = None) -> None:
         elif backend == "musescore":
             backend_musescore(midi_path, output_path)
         elif backend == "transformer":
-            backend_transformer(midi_path, output_path)
+            backend_transformer(midi_path, output_path, raw_notes=raw_notes)
     except Exception as exc:
         log.error("Pipeline failed: %s", exc)
         raise

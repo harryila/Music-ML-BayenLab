@@ -142,6 +142,45 @@ class MultistreamTokenizer:
         return MultistreamTokenizer.bucket_midi(midi_streams)
 
     @staticmethod
+    def parse_notes_from_dicts(notes: List[dict]) -> Dict[str, torch.Tensor]:
+        """Build the same tensor dict as parse_midi() from raw note dicts.
+
+        Accepts hFT-style dicts with keys 'onset', 'offset', 'pitch', 'velocity'
+        (onset/offset in seconds). Returns absolute onsets — bucket_midi()
+        computes deltas internally via torch.diff.
+        """
+        rows = sorted(
+            [(float(n["onset"]), int(n["pitch"]),
+              float(n["offset"]) - float(n["onset"]), int(n["velocity"]))
+             for n in notes if int(n["velocity"]) > 0],
+            key=lambda r: (r[0], r[1], r[2]),
+        )
+        if not rows:
+            return {
+                "onset": torch.tensor([], dtype=torch.float32),
+                "duration": torch.tensor([], dtype=torch.float32),
+                "pitch": torch.tensor([], dtype=torch.long),
+                "velocity": torch.tensor([], dtype=torch.long),
+            }
+        onset, pitch, dur, vel = zip(*rows)
+        return {
+            "onset": torch.FloatTensor(onset),
+            "duration": torch.FloatTensor(dur),
+            "pitch": torch.LongTensor(pitch),
+            "velocity": torch.LongTensor(vel),
+        }
+
+    @staticmethod
+    def tokenize_notes(notes: List[dict]) -> Dict[str, torch.Tensor]:
+        """tokenize_midi() equivalent that takes note dicts instead of a file.
+
+        Bypasses the MIDI file round-trip, preserving float-precision timestamps
+        from transcribers like hFT-Transformer.
+        """
+        streams = MultistreamTokenizer.parse_notes_from_dicts(notes)
+        return MultistreamTokenizer.bucket_midi(streams)
+
+    @staticmethod
     def mxl_to_list(mxl_path: str) -> tuple[List[note.Note], stream.Score]:
         """Converts a music21 stream to a sorted and deduplicated list of notes.
 
@@ -384,7 +423,7 @@ class MultistreamTokenizer:
         return MultistreamTokenizer.bucket_mxl(mxl_streams)
 
     @staticmethod
-    def detokenize_mxl(token_dict: Dict[str, torch.Tensor], midi_sequence: List[pretty_midi.Note]|None= None) -> stream.Score:
+    def detokenize_mxl(token_dict: Dict[str, torch.Tensor], midi_sequence: List[pretty_midi.Note]|None= None, _diagnostics: list|None= None) -> stream.Score:
         """Decode the token streams into a music21 stream that can be saved to musicxml.
         The surprising complexity comes from incompatibilities in music21's XML export.
         This function is tested such that saving and reloading the musicxml file should
@@ -503,6 +542,15 @@ class MultistreamTokenizer:
                                 elif frac.denominator == 16:
                                     return meter.TimeSignature(f"{frac.numerator}/16")
                             return None
+
+                        if _diagnostics is not None and part == 0:
+                            ts_candidate = find_time_signature(duration)
+                            _diagnostics.append({
+                                "note_idx": i,
+                                "bar_length_ql": float(duration),
+                                "time_sig": ts_candidate.ratioString if ts_candidate else None,
+                                "measure_num": m.number,
+                            })
 
                         if duration != 0 and duration != last_measure_duration:
                             ts = find_time_signature(duration)

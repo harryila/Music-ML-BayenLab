@@ -105,14 +105,6 @@ class BaseModel(pl.LightningModule):
                     logits[is_downbeat, 0] = -float("Inf")
 
                 if k == "accidental":
-                    # ensure that we only sample valid accidentals
-                    {
-                        0: 'double-flat',
-                        1: 'flat',
-                        2: 'natural',
-                        3: 'sharp',
-                        4: 'double-sharp',
-                    }
                     never_allowed = [0, 4, 6]
                     impossible_accidentals = {
                         0:  [1, 4],

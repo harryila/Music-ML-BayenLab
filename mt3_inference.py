@@ -241,6 +241,18 @@ class InferenceModel:
         return tokens
 
 
+_cached_model = None
+
+
+def _get_model(model_type="ismir2021"):
+    """Return a cached InferenceModel, loading only on first call or type change."""
+    global _cached_model
+    if _cached_model is None or _cached_model[0] != model_type:
+        checkpoint_path = str(CHECKPOINT_DIR / model_type)
+        _cached_model = (model_type, InferenceModel(checkpoint_path, model_type))
+    return _cached_model[1]
+
+
 def transcribe_audio(audio_path: str, midi_path: str, model_type: str = "ismir2021"):
     """Transcribe an audio file to MIDI using MT3.
 
@@ -265,8 +277,7 @@ def transcribe_audio(audio_path: str, midi_path: str, model_type: str = "ismir20
     t1 = time.time()
     print(f"  [MT3] Loading model (checkpoint: {model_type})...")
     sys.stdout.flush()
-    checkpoint_path = str(CHECKPOINT_DIR / model_type)
-    model = InferenceModel(checkpoint_path, model_type)
+    model = _get_model(model_type)
     print(f"  [MT3] Model loaded ({time.time()-t1:.1f}s)")
     sys.stdout.flush()
 
@@ -275,9 +286,8 @@ def transcribe_audio(audio_path: str, midi_path: str, model_type: str = "ismir20
     sys.stdout.flush()
     ds = model.audio_to_dataset(audio)
     ds = model.preprocess(ds)
+    ds = ds.cache()
     n_segments = sum(1 for _ in ds.as_numpy_iterator())
-    ds = model.audio_to_dataset(audio)
-    ds = model.preprocess(ds)
     print(f"  [MT3] {n_segments} segments to process ({time.time()-t2:.1f}s)")
     sys.stdout.flush()
 
