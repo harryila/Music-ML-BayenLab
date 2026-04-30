@@ -312,6 +312,65 @@ def run_musescore(mscore_path: str, input_path: str, output_path: str) -> bool:
     return True
 
 
+def run_musescore_chunked(mscore_path: str, mxl_path: str, output_path: str,
+                          chunk_size: int = 10) -> bool:
+    """Fallback renderer: split score into chunks, render each, merge PDFs.
+
+    MuseScore CLI crashes on large/complex MusicXML files. This splits the
+    score into small measure chunks, renders each independently, and merges
+    the resulting PDFs. Chunks that fail are skipped with a warning.
+    """
+    import tempfile
+    from music21 import converter as m21_converter
+
+    log.info("      Attempting chunked rendering (%d measures per chunk)...", chunk_size)
+    score = m21_converter.parse(mxl_path)
+    parts = score.parts
+    if not parts:
+        return False
+
+    max_measures = max(len(list(p.getElementsByClass("Measure"))) for p in parts)
+    pdfs = []
+    failed_ranges = []
+
+    for start in range(0, max_measures, chunk_size):
+        end = min(start + chunk_size, max_measures)
+        chunk = score.measures(start + 1, end)
+
+        tmp_mxl = tempfile.mktemp(suffix=".musicxml")
+        chunk.write("musicxml", fp=tmp_mxl)
+
+        tmp_pdf = tempfile.mktemp(suffix=".pdf")
+        if run_musescore(mscore_path, tmp_mxl, tmp_pdf):
+            pdfs.append(tmp_pdf)
+        else:
+            failed_ranges.append(f"m{start+1}-{end}")
+
+        os.unlink(tmp_mxl)
+
+    if not pdfs:
+        log.error("      All chunks failed to render.")
+        return False
+
+    if failed_ranges:
+        log.warning("      Skipped chunks: %s", ", ".join(failed_ranges))
+
+    if len(pdfs) == 1:
+        os.rename(pdfs[0], output_path)
+    else:
+        from pypdf import PdfWriter
+        writer = PdfWriter()
+        for pdf_path in pdfs:
+            writer.append(pdf_path)
+        writer.write(output_path)
+        writer.close()
+        for p in pdfs:
+            os.unlink(p)
+
+    log.info("      Chunked render: %d/%d chunks OK", len(pdfs), len(pdfs) + len(failed_ranges))
+    return True
+
+
 # ---------------------------------------------------------------------------
 # Backend: music21 (heuristics + LilyPond)
 # ---------------------------------------------------------------------------
@@ -539,10 +598,13 @@ def backend_transformer(midi_path: Path, output_path: Path, raw_notes: list = No
         log.info("      Output: %s", output_path)
         return output_path
     else:
-        log.warning("      MuseScore could not render the score.")
-        log.warning("      MusicXML preserved at: %s", mxl_path)
-        log.warning("      Try opening it in MuseScore GUI, or use -b musescore instead.")
-        return mxl_path
+        log.warning("      Full render failed. Trying chunked rendering...")
+        if run_musescore_chunked(mscore, str(mxl_path), str(output_path)):
+            log.info("      Output: %s", output_path)
+            return output_path
+        else:
+            log.warning("      MusicXML preserved at: %s", mxl_path)
+            return mxl_path
 
 
 # ---------------------------------------------------------------------------
