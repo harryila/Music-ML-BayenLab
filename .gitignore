@@ -23,6 +23,23 @@ benchmark/*/*.midi
 benchmark/*/path_b/
 benchmark/*/path_c/
 
+# Synthetic pretrain bulk — all regenerable from scripts/
+data/pairs/
+data/cache_pdmx/
+data/pdmx_piano_subset.csv
+data/render_test/
+
+# ASAP dataset clone (regenerable: clone TimFelixBeyer/asap-dataset at the
+# pinned commit, see MIDI2ScoreTransformer/README.md)
+MIDI2ScoreTransformer/data/asap-dataset/
+
+# Audio preprocessing artifacts (regenerable via --normalize-audio)
+*.pre.wav
+
+# Empty pretrain eval outputs (the from-zero-generation issue is documented;
+# see SYNTHETIC_PRETRAIN_STATUS.md)
+benchmark/pretrain_eval/
+
 # OS
 .DS_Store
 

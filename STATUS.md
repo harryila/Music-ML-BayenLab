@@ -38,7 +38,12 @@ Last updated after MAESTRO ground-truth benchmark.
 | # | What | Files changed |
 |---|------|---------------|
 | 7 | Increased MIDI2ScoreTF overlap from 64 to 128 | `transcribe.py` |
+| 8 | A1: Lower pad threshold via `--pad-threshold` flag (default 0.5) | `tokenizer.py`, `transcribe.py` |
+| 9 | A2: top-k / temperature flags (`--top-k`, `--temperature`) | `utils.py`, `transcribe.py` |
+| 11 | A3: Fixed per-voice padding bug in `score_utils.py` | `score_utils.py` |
 | 12 | Removed dead code (no-op dict in `generate()`) | `MIDI2ScoreTransformer/.../model.py` |
+| — | A5: `--normalize-audio` flag (mono+resample+peak norm for hFT) | `transcribe.py` |
+| — | A1-A5 benchmark eval framework | `benchmark/eval_improvements.py`, `benchmark/IMPROVEMENT_RESULTS.md` |
 
 ### Phase 3 improvements
 
@@ -88,10 +93,7 @@ Last updated after MAESTRO ground-truth benchmark.
 | # | What | Effort | Risk |
 |---|------|--------|------|
 | 1 | Try `mt3` model type (with ties) for sustain-heavy pieces | Low | Medium |
-| 8 | Lower MIDI2ScoreTF pad threshold from 0.5 to 0.3-0.4 | Low | Medium |
-| 9 | Try `top_k=5, temperature=0.8` in MIDI2ScoreTF generation | Low | Medium |
 | 10 | Raise measure merge threshold from 6 to 12 | Low | Low |
-| 11 | Fix voice padding bug (`m.highestTime` → `v.highestTime`) | Low | Low |
 
 ### Medium priority (medium effort)
 
@@ -122,6 +124,8 @@ Last updated after MAESTRO ground-truth benchmark.
 | MIDI2ScoreTF measure count is closer to published scores than MuseScore | Medium (positive) | Document as validation of the model's value |
 | MuseScore CLI crashes on complex MIDI2ScoreTF MusicXML (>3000 notes) | Medium | Already handled with fallback; could investigate chunked rendering |
 | Liszt Mazeppa: MIDI2ScoreTF produced 322 measures vs 167 expected | High | Likely related to time sig issue; too many barlines from wrong meter |
+| **A1-A5 inference-time tweaks: ±0.005 F1 swing, no time-sig fix on Mazeppa** | High | Empirically confirmed Phase 2 is data-bound; pretrain plan justified. See `benchmark/IMPROVEMENT_RESULTS.md` |
+| **A4 (chunk_size > 512) crashes the model**: trained at `seq_length=512`, position embeddings break above that | Medium | Chunk-size flag exists but cannot exceed 512 on this checkpoint. Fix requires retraining |
 
 ---
 

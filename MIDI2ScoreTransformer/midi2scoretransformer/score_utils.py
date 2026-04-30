@@ -244,7 +244,10 @@ def postprocess_score(mxl: stream.Score, makeChords: bool=False, inPlace=False) 
             v: stream.Voice
             # Clean up overlaps
             v.id = str(source + 1)
-            if m.highestTime < m.barDuration.quarterLength:
+            # Per-voice padding: if THIS voice is short of the bar duration,
+            # pad it. Original code checked m.highestTime which left short
+            # voices unpadded when any other voice in the measure was full.
+            if v.highestTime < m.barDuration.quarterLength:
                 quarterLength = m.barDuration.quarterLength - v.highestTime
                 rest = note.Rest(quarterLength=quarterLength)
                 v.append(rest.splitAtDurations())

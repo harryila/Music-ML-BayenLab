@@ -599,26 +599,34 @@ python evaluate.py samples/TwinkleTwinkle.mp3 \
 
 ## Priority Matrix
 
-| # | Improvement | Effort | Impact | Risk |
-|---|-------------|--------|--------|------|
-| 6 | Post-MIDI filtering | Low | High | Low |
-| 7 | Increase MIDI2ScoreTF overlap | Low | Medium | Low |
-| 5 | Expose Basic Pitch thresholds | Low | Medium | Low |
-| 15 | Handle MuseScore crashes | Low | Medium | Low |
-| 19 | Add --skip-phase1 flag | Low | Medium | Low |
-| 4 | MT3 model caching | Low | Low | Low |
-| 16 | Save intermediate MusicXML | Trivial | Low | None |
-| 12 | Dead code cleanup | Trivial | None | None |
-| 17 | Fix LilyPond space-in-filename | Low | Low | Low |
-| 1 | Try mt3 model for sustain pieces | Low | Medium | Medium |
-| 8 | Lower pad threshold | Low | Medium | Medium |
-| 10 | Raise measure merge threshold | Low | Low | Low |
-| 11 | Fix voice padding bug | Low | Low | Low |
-| 9 | Try top_k=5 in MIDI2ScoreTF | Low | Medium | Medium |
-| 2 | Expose beam search params | Medium | Medium | Medium |
-| 13 | Windowed key detection | Medium | Medium | Low |
-| 14 | Hand splitting heuristic | Medium | Medium | Medium |
-| 3 | Overlapping audio segments | High | High | High |
-| 18 | Unify venvs | High | Medium | Medium |
-| 20 | Batch processing | Medium | Low | Low |
-| 21 | Evaluation framework | Medium-high | High | Low |
+| # | Improvement | Effort | Predicted Impact | Actual Impact (measured) | Risk |
+|---|-------------|--------|------------------|--------------------------|------|
+| 6 | Post-MIDI filtering | Low | High | (shipped, not re-measured) | Low |
+| 7 | Increase MIDI2ScoreTF overlap | Low | Medium | (shipped, not re-measured) | Low |
+| 5 | Expose Basic Pitch thresholds | Low | Medium | (shipped) | Low |
+| 15 | Handle MuseScore crashes | Low | Medium | (shipped, partial PDFs save) | Low |
+| 19 | Add --skip-phase1 flag | Low | Medium | (shipped) | Low |
+| 8 | **A1: Lower pad threshold** | Low | Medium | **±0 F1, 0 measure change on 4 pieces** | Low |
+| 9 | **A2: top_k=5, T=0.8** | Low | Medium | **+0.001 F1 (Op10), no other change** | Low |
+| 11 | **A3: Voice padding fix** | Low | Low | **No measurable change on 4 pieces** | Low |
+| — | **A4: chunk_size > 512** | Low | Medium | **Cannot use — model trained at 512, IndexError** | High |
+| — | **A5: Audio mono+resample+peak normalize** | Low | Medium | **Mixed. Mazeppa: TS still wrong, F1 dropped 0.959 → 0.936** | Medium |
+| 4 | MT3 model caching | Low | Low | (shipped) | Low |
+| 16 | Save intermediate MusicXML | Trivial | Low | (shipped) | None |
+| 12 | Dead code cleanup | Trivial | None | (shipped) | None |
+| 17 | Fix LilyPond space-in-filename | Low | Low | (shipped) | Low |
+| 1 | Try mt3 model for sustain pieces | Low | Medium | (not tested) | Medium |
+| 10 | Raise measure merge threshold | Low | Low | (not tested) | Low |
+| 2 | Expose beam search params | Medium | Medium | (not tested) | Medium |
+| 13 | Windowed key detection | Medium | Medium | (deprioritized) | Low |
+| 14 | Hand splitting heuristic | Medium | Medium | (deprioritized — TF backend has hand stream) | Medium |
+| 3 | Overlapping audio segments | High | High | (deprioritized — MT3 not primary) | High |
+| 18 | Unify venvs | High | Medium | (partially via direct hFT handoff) | Medium |
+| 20 | Batch processing | Medium | Low | (deferred) | Low |
+| 21 | Evaluation framework | Medium-high | High | **A1-A5 framework shipped at `benchmark/eval_improvements.py`** | Low |
+
+## A1-A5 measured results (2026-04)
+
+Tested on Twinkle Twinkle plus 3 MAESTRO benchmark pieces (Chopin Op.10 No.4, Op.25 No.11, Liszt Mazeppa). Each improvement was tested individually and combined. See [benchmark/IMPROVEMENT_RESULTS.md](benchmark/IMPROVEMENT_RESULTS.md) for the full table and analysis.
+
+**Top-line: inference-time tweaks barely move the needle.** Note F1 swings are within ±0.005 across all variants; measure counts within ±2; time signature predictions are unchanged from baseline. Mazeppa stays broken (3/4 instead of 4/4) regardless of any inference flag combination. This empirically confirms Phase 2 is **data-bound** rather than hyperparameter-bound, justifying the synthetic pretrain plan.

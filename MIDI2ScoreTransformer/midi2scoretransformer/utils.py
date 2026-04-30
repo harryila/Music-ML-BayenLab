@@ -66,7 +66,8 @@ def quantize_path(path, model, **kwargs):
     return mxl
 
 
-def infer(x, model, overlap=64, chunk=512, verbose=True, kv_cache=True) -> dict[str, torch.Tensor]:
+def infer(x, model, overlap=64, chunk=512, verbose=True, kv_cache=True,
+          top_k: int = 1, temperature: float = 1.0) -> dict[str, torch.Tensor]:
     single_example = x['pitch'].ndim == 2
     if single_example:
         x = {k: v.unsqueeze(0) for k, v in x.items()}
@@ -79,12 +80,12 @@ def infer(x, model, overlap=64, chunk=512, verbose=True, kv_cache=True) -> dict[
             print("Infer", i, "/", x['pitch'].shape[1], end='\r')
         x_chunk = {k: v[:, i:i + chunk] for k, v in x.items()}
         if i == 0 or overlap == 0:  # No context required
-            y_hat = model.generate(x=x_chunk, top_k=1, max_length=chunk, kv_cache=kv_cache)
+            y_hat = model.generate(x=x_chunk, top_k=top_k, temperature=temperature, max_length=chunk, kv_cache=kv_cache)
         else:
             # Keep the last 'overlap' notes of the previous chunk as context
             y_hat_prev = {k: v[:, -overlap:] if k != 'pad' else v[:, -overlap:, 0] for k, v in y_full.items()}
             with torch.autocast(device_type=device):
-                y_hat = model.generate(x=x_chunk, y=y_hat_prev, top_k=1, max_length=chunk, kv_cache=kv_cache)
+                y_hat = model.generate(x=x_chunk, y=y_hat_prev, top_k=top_k, temperature=temperature, max_length=chunk, kv_cache=kv_cache)
             y_hat = {k: v[:, overlap:] for k, v in y_hat.items()}
 
         if y_full is None:

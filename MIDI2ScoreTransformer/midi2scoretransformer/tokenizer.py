@@ -337,8 +337,11 @@ class MultistreamTokenizer:
             hand_stream = []
             not_matched = set()
             for n in mxl_list:
-                # Usually part names are similar to "[P1-Staff2]"
-                part_name = n.getContextByClass("Part").id.lower()
+                # Usually part names are similar to "[P1-Staff2]". For some
+                # auto-generated MusicXML, part.id can be an int — coerce to
+                # str defensively. Fallthrough hand=2 is acceptable when no
+                # staff hint is present in the part name.
+                part_name = str(n.getContextByClass("Part").id).lower()
                 if "staff1" in part_name:
                     hand_stream.append(0)
                 elif "staff2" in part_name:
@@ -423,7 +426,7 @@ class MultistreamTokenizer:
         return MultistreamTokenizer.bucket_mxl(mxl_streams)
 
     @staticmethod
-    def detokenize_mxl(token_dict: Dict[str, torch.Tensor], midi_sequence: List[pretty_midi.Note]|None= None, _diagnostics: list|None= None) -> stream.Score:
+    def detokenize_mxl(token_dict: Dict[str, torch.Tensor], midi_sequence: List[pretty_midi.Note]|None= None, _diagnostics: list|None= None, pad_threshold: float = 0.5) -> stream.Score:
         """Decode the token streams into a music21 stream that can be saved to musicxml.
         The surprising complexity comes from incompatibilities in music21's XML export.
         This function is tested such that saving and reloading the musicxml file should
@@ -434,13 +437,16 @@ class MultistreamTokenizer:
         token_dict : Dict[str, torch.Tensor]
             Dict of tensors of shape (n_notes, n_buckets) with keys "offset", "duration",
             "pitch", "velocity" and a padding tensor of shape (n_notes, ) with key "pad".
+        pad_threshold : float, default 0.5
+            Sigmoid threshold for the pad stream. Lowering to ~0.3-0.4 rescues notes the
+            model is slightly unsure about. 0.5 is the original conservative default.
 
         Returns
         -------
         music21.stream.Stream
             music21 stream that can be saved to musicxml.
         """
-        mask = token_dict["pad"].squeeze() > 0.5  # allow for prediction/soft values
+        mask = token_dict["pad"].squeeze() > pad_threshold  # allow for prediction/soft values
         # fmt: off
         offset_stream = one_hot_unbucketing(token_dict["offset"][mask], **PARAMS["offset"]).numpy().astype(float)
         duration_stream = one_hot_unbucketing(token_dict["duration"][mask], **PARAMS["duration"]).numpy().astype(float)

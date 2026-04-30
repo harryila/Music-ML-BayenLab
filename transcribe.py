@@ -43,6 +43,44 @@ HFT_CHECKPOINT = HFT_DIR / "checkpoint" / "MAESTRO-V3" / "model_016_003.pkl"
 # Phase 1: Audio → MIDI
 # ---------------------------------------------------------------------------
 
+def preprocess_audio(audio_path: Path, target_sr: int = 16000,
+                     peak_dbfs: float = -3.0) -> Path:
+    """Mono downmix + resample + peak normalize. Writes a sibling .pre.wav file
+    and returns its path. Helpful for hFT, which is sensitive to recording
+    level and expects 16 kHz mono.
+
+    Peak normalization (not LUFS) is used to keep the dependency surface tiny
+    and to avoid skewing the velocity prediction more than necessary.
+    """
+    import numpy as np
+    import soxr
+    try:
+        import soundfile as sf
+    except ImportError:
+        log.error("--normalize-audio requires soundfile. Install with: pip install soundfile")
+        sys.exit(1)
+
+    out_path = audio_path.with_suffix(".pre.wav")
+    log.info("      Preprocessing audio (mono, %d Hz, peak %.1f dBFS)...", target_sr, peak_dbfs)
+
+    audio, sr = sf.read(str(audio_path), always_2d=True)
+    if audio.shape[1] > 1:
+        audio = audio.mean(axis=1)
+    else:
+        audio = audio[:, 0]
+
+    if sr != target_sr:
+        audio = soxr.resample(audio, sr, target_sr)
+
+    peak = float(np.max(np.abs(audio))) or 1.0
+    target_peak = 10.0 ** (peak_dbfs / 20.0)
+    audio = audio * (target_peak / peak)
+
+    sf.write(str(out_path), audio.astype("float32"), target_sr, subtype="PCM_16")
+    log.info("      Preprocessed audio: %s", out_path)
+    return out_path
+
+
 def audio_to_midi_basic_pitch(audio_path: Path, midi_path: Path,
                               onset_threshold: float = 0.5,
                               frame_threshold: float = 0.3) -> int:
@@ -523,7 +561,12 @@ def _fix_time_signatures(score, diagnostics: list):
     return score
 
 
-def backend_transformer(midi_path: Path, output_path: Path, raw_notes: list = None) -> Path:
+def backend_transformer(midi_path: Path, output_path: Path, raw_notes: list = None,
+                        pad_threshold: float = 0.5,
+                        top_k: int = 1,
+                        temperature: float = 1.0,
+                        chunk_size: int = 512,
+                        overlap: int = 128) -> Path:
     if not TRANSFORMER_DIR.is_dir():
         log.error("MIDI2ScoreTransformer repo not found at %s", TRANSFORMER_DIR)
         log.error("Clone it: git clone https://github.com/TimFelixBeyer/MIDI2ScoreTransformer.git")
@@ -577,12 +620,15 @@ def backend_transformer(midi_path: Path, output_path: Path, raw_notes: list = No
         log.info("      Tokenizing MIDI...")
         x = MultistreamTokenizer.tokenize_midi(str(midi_path))
 
-    log.info("      Running inference (%d notes)...", x["pitch"].shape[0])
-    y_hat = infer(x, model, verbose=False, kv_cache=True, overlap=128)
+    log.info("      Running inference (%d notes, chunk=%d, overlap=%d, top_k=%d, T=%.2f)...",
+             x["pitch"].shape[0], chunk_size, overlap, top_k, temperature)
+    y_hat = infer(x, model, verbose=False, kv_cache=True,
+                  overlap=overlap, chunk=chunk_size,
+                  top_k=top_k, temperature=temperature)
 
-    log.info("      Decoding to score...")
+    log.info("      Decoding to score (pad_threshold=%.2f)...", pad_threshold)
     diagnostics = []
-    mxl = MultistreamTokenizer.detokenize_mxl(y_hat, _diagnostics=diagnostics)
+    mxl = MultistreamTokenizer.detokenize_mxl(y_hat, _diagnostics=diagnostics, pad_threshold=pad_threshold)
     mxl = _fix_time_signatures(mxl, diagnostics)
     mxl = postprocess_score(mxl, inPlace=True)
 
@@ -671,6 +717,52 @@ def parse_args(argv: Optional[list] = None) -> argparse.Namespace:
              "musescore (MuseScore MIDI import), "
              "transformer (MIDI2ScoreTransformer neural model). Default: music21.",
     )
+    # MIDI2ScoreTransformer (transformer backend) tuning flags --------------
+    parser.add_argument(
+        "--pad-threshold",
+        type=float,
+        default=0.5,
+        help="Transformer backend: sigmoid threshold for the pad stream during "
+             "detokenization. Lower (~0.3-0.4) rescues notes the model is unsure "
+             "about. Default: 0.5 (paper default).",
+    )
+    parser.add_argument(
+        "--top-k",
+        type=int,
+        default=1,
+        help="Transformer backend: top-k sampling. 1 = greedy (paper default). "
+             "Try 5 with --temperature 0.8 for slightly more diverse decoding.",
+    )
+    parser.add_argument(
+        "--temperature",
+        type=float,
+        default=1.0,
+        help="Transformer backend: sampling temperature. 1.0 = no scaling. "
+             "Lower = sharper, higher = flatter. Default: 1.0.",
+    )
+    parser.add_argument(
+        "--chunk-size",
+        type=int,
+        default=512,
+        help="Transformer backend: per-chunk decode length. Larger chunks give "
+             "the model more long-range context (better time-sig / barlines) "
+             "but slower. Default: 512 (paper default). Try 1024.",
+    )
+    parser.add_argument(
+        "--overlap",
+        type=int,
+        default=128,
+        help="Transformer backend: overlap between adjacent chunks. Higher = "
+             "more cross-chunk consistency. Default: 128. Must be < --chunk-size.",
+    )
+    # Audio preprocessing (Phase 1) -----------------------------------------
+    parser.add_argument(
+        "--normalize-audio",
+        action="store_true",
+        help="hFT only: downmix to mono, resample to 16 kHz, peak-normalize "
+             "to -3 dBFS before transcription. Helps when input recordings "
+             "have very different levels.",
+    )
     return parser.parse_args(argv)
 
 
@@ -716,6 +808,10 @@ def main(argv: Optional[list] = None) -> None:
         # Phase 1: Audio → MIDI
         transcriber = args.transcriber
         raw_notes = None
+
+        if args.normalize_audio and transcriber == "hft":
+            audio_path = preprocess_audio(audio_path, target_sr=16000, peak_dbfs=-3.0)
+
         try:
             n_notes, raw_notes = audio_to_midi(
                 audio_path, midi_path, transcriber=transcriber,
@@ -747,7 +843,14 @@ def main(argv: Optional[list] = None) -> None:
         elif backend == "musescore":
             backend_musescore(midi_path, output_path)
         elif backend == "transformer":
-            backend_transformer(midi_path, output_path, raw_notes=raw_notes)
+            backend_transformer(
+                midi_path, output_path, raw_notes=raw_notes,
+                pad_threshold=args.pad_threshold,
+                top_k=args.top_k,
+                temperature=args.temperature,
+                chunk_size=args.chunk_size,
+                overlap=args.overlap,
+            )
     except Exception as exc:
         log.error("Pipeline failed: %s", exc)
         raise
