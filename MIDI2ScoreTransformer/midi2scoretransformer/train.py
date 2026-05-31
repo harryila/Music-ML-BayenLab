@@ -39,6 +39,13 @@ from config import FEATURES, MyModelConfig
 from models.roformer import Roformer
 from utils import pad_batch
 
+# Compat shim (newer transformers): the released ckpt's MyModelConfig predates
+# the `_attn_implementation_internal` attribute that current transformers expect
+# to read during model construction. Provide a default + allow safe unpickling.
+if not hasattr(MyModelConfig, "_attn_implementation_internal"):
+    MyModelConfig._attn_implementation_internal = None
+torch.serialization.add_safe_globals([MyModelConfig])
+
 log = logging.getLogger(__name__)
 
 device_str = "cuda" if torch.cuda.is_available() else ("mps" if torch.backends.mps.is_available() else "cpu")

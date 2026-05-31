@@ -28,7 +28,8 @@ from pathlib import Path
 
 warnings.simplefilter("ignore")
 
-TF_ROOT = Path("/Users/harry/Desktop/temp/musicML/MIDI2ScoreTransformer")
+REPO_ROOT = Path(__file__).resolve().parent.parent
+TF_ROOT = REPO_ROOT / "MIDI2ScoreTransformer"
 sys.path.insert(0, str(TF_ROOT / "midi2scoretransformer"))
 # ASAPDataset reads "./data/..." relatively, and {ASAP} paths resolve under cwd.
 os.chdir(TF_ROOT)
@@ -126,7 +127,7 @@ def main():
 
     out_path = Path(args.out)
     if not out_path.is_absolute():
-        out_path = Path("/Users/harry/Desktop/temp/musicML") / out_path
+        out_path = REPO_ROOT / out_path
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
     device = args.device

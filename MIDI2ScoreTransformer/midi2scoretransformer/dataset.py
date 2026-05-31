@@ -375,7 +375,7 @@ class ASAPDataset(Dataset):
                                 accidental_cand.fill_(6)
                                 keysignature_cand.fill_(15)
                                 break
-                            accidental_cand[i] = val * 1.0
+                            accidental_cand[i] = float(val)
                     error = (accidental_cand[accidental_cand != 5] - 2).abs().sum()
                     errors[interv] = error
                     # print(f"Error: {error} for {interv}", accidental_cand)
