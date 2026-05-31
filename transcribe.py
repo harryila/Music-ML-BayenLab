@@ -174,8 +174,17 @@ def audio_to_midi_transkun(audio_path: Path, midi_path: Path) -> int:
     return n_notes
 
 
-def audio_to_midi_hft(audio_path: Path, midi_path: Path) -> int:
-    """Run hFT-Transformer inference and write a MIDI file."""
+def audio_to_midi_hft(audio_path: Path, midi_path: Path,
+                      thred_onset: float = 0.5, thred_mpe: float = 0.5,
+                      thred_offset: float = 0.5,
+                      mode_offset: str = "shorter") -> int:
+    """Run hFT-Transformer inference and write a MIDI file.
+
+    thred_onset / thred_mpe / thred_offset: detection thresholds (default 0.5).
+    Lowering onset/mpe (~0.3-0.4) rescues soft/dense notes the 0.5 default drops
+    — the single biggest Phase-1 recall knob. mode_offset ('shorter'|'offset'|
+    'longer') controls note-duration estimation; 'shorter' clips sustained notes.
+    """
     log.info("[1/3] Audio → MIDI (hFT-Transformer)")
     log.info("      Input:  %s", audio_path)
 
@@ -228,10 +237,12 @@ def audio_to_midi_hft(audio_path: Path, midi_path: Path) -> int:
     onset_A, offset_A, mpe_A, vel_A = out[0], out[1], out[2], out[3]
     onset_B, offset_B, mpe_B, vel_B = out[4], out[5], out[6], out[7]
 
+    log.info("      hFT thresholds: onset=%.2f mpe=%.2f offset=%.2f mode_offset=%s",
+             thred_onset, thred_mpe, thred_offset, mode_offset)
     a_note = amtobj.mpe2note(
         a_onset=onset_B, a_offset=offset_B, a_mpe=mpe_B, a_velocity=vel_B,
-        thred_onset=0.5, thred_offset=0.5, thred_mpe=0.5,
-        mode_velocity="ignore_zero", mode_offset="shorter",
+        thred_onset=thred_onset, thred_offset=thred_offset, thred_mpe=thred_mpe,
+        mode_velocity="ignore_zero", mode_offset=mode_offset,
     )
 
     amtobj.note2midi(a_note, str(midi_path))
@@ -243,7 +254,9 @@ def audio_to_midi_hft(audio_path: Path, midi_path: Path) -> int:
 
 
 def audio_to_midi(audio_path: Path, midi_path: Path, transcriber: str = "basic-pitch",
-                  onset_threshold: float = 0.5, frame_threshold: float = 0.3):
+                  onset_threshold: float = 0.5, frame_threshold: float = 0.3,
+                  hft_onset_threshold: float = 0.5, hft_mpe_threshold: float = 0.5,
+                  hft_offset_threshold: float = 0.5, hft_offset_mode: str = "shorter"):
     """Dispatch to the chosen transcriber. Returns (n_notes, raw_notes_or_None)."""
     midi_path.parent.mkdir(parents=True, exist_ok=True)
     if transcriber == "basic-pitch":
@@ -255,7 +268,11 @@ def audio_to_midi(audio_path: Path, midi_path: Path, transcriber: str = "basic-p
     elif transcriber == "transkun":
         return audio_to_midi_transkun(audio_path, midi_path), None
     elif transcriber == "hft":
-        return audio_to_midi_hft(audio_path, midi_path)
+        return audio_to_midi_hft(audio_path, midi_path,
+                                 thred_onset=hft_onset_threshold,
+                                 thred_mpe=hft_mpe_threshold,
+                                 thred_offset=hft_offset_threshold,
+                                 mode_offset=hft_offset_mode)
     else:
         raise ValueError(f"Unknown transcriber: {transcriber}")
 
@@ -566,7 +583,8 @@ def backend_transformer(midi_path: Path, output_path: Path, raw_notes: list = No
                         top_k: int = 1,
                         temperature: float = 1.0,
                         chunk_size: int = 512,
-                        overlap: int = 128) -> Path:
+                        overlap: int = 128,
+                        no_render: bool = False) -> Path:
     if not TRANSFORMER_DIR.is_dir():
         log.error("MIDI2ScoreTransformer repo not found at %s", TRANSFORMER_DIR)
         log.error("Clone it: git clone https://github.com/TimFelixBeyer/MIDI2ScoreTransformer.git")
@@ -636,6 +654,10 @@ def backend_transformer(midi_path: Path, output_path: Path, raw_notes: list = No
     mxl_path = output_path.with_suffix(".musicxml")
     mxl.write("musicxml", fp=str(mxl_path))
     log.info("      MusicXML saved: %s", mxl_path)
+
+    if no_render:
+        log.info("      --no-render: skipping MuseScore (MusicXML only)")
+        return mxl_path
 
     log.info("[3/3] Score → Sheet Music (MuseScore)")
     log.info("      MuseScore: %s", mscore)
@@ -755,6 +777,36 @@ def parse_args(argv: Optional[list] = None) -> argparse.Namespace:
         help="Transformer backend: overlap between adjacent chunks. Higher = "
              "more cross-chunk consistency. Default: 128. Must be < --chunk-size.",
     )
+    # hFT (Phase 1) detection tuning ----------------------------------------
+    parser.add_argument(
+        "--hft-onset-threshold",
+        type=float,
+        default=0.5,
+        help="hFT only: onset detection threshold (0-1). Lower (~0.3-0.4) "
+             "rescues soft/dense notes the 0.5 default misses — the biggest "
+             "Phase-1 recall knob. Default: 0.5.",
+    )
+    parser.add_argument(
+        "--hft-mpe-threshold",
+        type=float,
+        default=0.5,
+        help="hFT only: multi-pitch (frame) threshold (0-1). Lower rescues "
+             "notes in dense passages. Default: 0.5.",
+    )
+    parser.add_argument(
+        "--hft-offset-threshold",
+        type=float,
+        default=0.5,
+        help="hFT only: offset detection threshold (0-1). Default: 0.5.",
+    )
+    parser.add_argument(
+        "--hft-offset-mode",
+        choices=["shorter", "offset", "longer"],
+        default="shorter",
+        help="hFT only: note-duration estimation. 'shorter' (default) clips "
+             "sustained notes; 'offset'/'longer' preserve duration better for "
+             "pedaled/sustained repertoire.",
+    )
     # Audio preprocessing (Phase 1) -----------------------------------------
     parser.add_argument(
         "--normalize-audio",
@@ -762,6 +814,13 @@ def parse_args(argv: Optional[list] = None) -> argparse.Namespace:
         help="hFT only: downmix to mono, resample to 16 kHz, peak-normalize "
              "to -3 dBFS before transcription. Helps when input recordings "
              "have very different levels.",
+    )
+    parser.add_argument(
+        "--no-render",
+        action="store_true",
+        help="transformer backend: save the MusicXML but skip the MuseScore "
+             "render step. Faster for evaluation (the scored artifact is the "
+             "MusicXML, not the PDF).",
     )
     return parser.parse_args(argv)
 
@@ -816,7 +875,11 @@ def main(argv: Optional[list] = None) -> None:
             n_notes, raw_notes = audio_to_midi(
                 audio_path, midi_path, transcriber=transcriber,
                 onset_threshold=args.onset_threshold,
-                frame_threshold=args.frame_threshold)
+                frame_threshold=args.frame_threshold,
+                hft_onset_threshold=args.hft_onset_threshold,
+                hft_mpe_threshold=args.hft_mpe_threshold,
+                hft_offset_threshold=args.hft_offset_threshold,
+                hft_offset_mode=args.hft_offset_mode)
         except Exception as exc:
             log.error("Audio → MIDI failed: %s", exc)
             sys.exit(1)
@@ -850,6 +913,7 @@ def main(argv: Optional[list] = None) -> None:
                 temperature=args.temperature,
                 chunk_size=args.chunk_size,
                 overlap=args.overlap,
+                no_render=args.no_render,
             )
     except Exception as exc:
         log.error("Pipeline failed: %s", exc)
