@@ -320,11 +320,96 @@ def make_pdmx_loaders(manifest_csv: str, seq_length: int = 512,
     return train_loader, val_loader
 
 
+# Augmentations applied to the REAL ASAP stream (mirror the released ckpt's recipe).
+_REAL_AUG = {"transpose": True, "random_crop": True, "tempo_jitter": (0.8, 1.2),
+             "onset_jitter": 0.05, "random_shift": 8, "velocity_jitter": 5}
+
+
+def make_asap_loaders(seq_length: int = 512, batch_size: int = 16,
+                      num_workers: int = 8, data_dir: str = "./data/"):
+    """Real ASAP (perf-MIDI, engraved-MusicXML) pairs via the upstream ASAPDataset.
+
+    The released model was trained on ASAP; this lets us continue-train on the full
+    ~750-performance train split (held out by TEST_PIECE_IDS) instead of only the
+    14-piece eval subset. Requires _chunks.json (run chunker.py first).
+    """
+    from dataset import ASAPDataset
+    train_ds = ASAPDataset(data_dir, "train", seq_length=seq_length,
+                           padding="per-beat", augmentations=_REAL_AUG)
+    val_ds = ASAPDataset(data_dir, "validation", seq_length=seq_length,
+                         padding="per-beat", augmentations={})
+    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True,
+                              num_workers=num_workers, collate_fn=collate_fn,
+                              persistent_workers=num_workers > 0, pin_memory=True)
+    val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False,
+                            num_workers=num_workers, collate_fn=collate_fn,
+                            persistent_workers=num_workers > 0, pin_memory=True)
+    return train_loader, val_loader
+
+
+def make_mixed_loaders(manifest_csv: str, seq_length: int = 512, batch_size: int = 16,
+                       num_workers: int = 8, real_fraction: float = 0.8,
+                       data_dir: str = "./data/"):
+    """Joint real+synthetic loader with REAL-MAJORITY replay (default 80/20).
+
+    A naive concat of ~750 real ASAP pairs with ~50k synthetic pairs is ~65:1
+    synthetic-dominated, which empirically degraded MUSTER 11.18 -> 18.10 (see
+    benchmark/GPU_FINETUNE_RESULTS.md). A WeightedRandomSampler over the
+    ConcatDataset upweights the real pairs so each batch is ~`real_fraction` real,
+    directly countering the domination / catastrophic forgetting. Validation is on
+    REAL ASAP only (we care about real-performance accuracy).
+    """
+    from dataset import ASAPDataset
+    from pdmx_dataset import PDMXDataset
+    from torch.utils.data import ConcatDataset, WeightedRandomSampler
+
+    real_train = ASAPDataset(data_dir, "train", seq_length=seq_length,
+                             padding="per-beat", augmentations=_REAL_AUG)
+    synth_train = PDMXDataset(manifest_csv, split="train", seq_length=seq_length,
+                              padding="per-beat",
+                              augmentations={"transpose": True, "random_crop": True,
+                                             "tempo_jitter": (0.8, 1.2),
+                                             "onset_jitter": 0.05, "random_shift": 8,
+                                             "velocity_jitter": 5})
+    n_real, n_synth = len(real_train), len(synth_train)
+    concat = ConcatDataset([real_train, synth_train])
+
+    rf = real_fraction
+    w_real = rf / max(n_real, 1)
+    w_synth = (1.0 - rf) / max(n_synth, 1)
+    weights = torch.tensor([w_real] * n_real + [w_synth] * n_synth, dtype=torch.double)
+    num_samples = int(n_real / max(rf, 1e-6))  # ~one pass over real per "epoch"
+    sampler = WeightedRandomSampler(weights, num_samples=num_samples, replacement=True)
+
+    train_loader = DataLoader(concat, batch_size=batch_size, sampler=sampler,
+                              num_workers=num_workers, collate_fn=collate_fn,
+                              persistent_workers=num_workers > 0, pin_memory=True)
+    val_ds = ASAPDataset(data_dir, "validation", seq_length=seq_length,
+                         padding="per-beat", augmentations={})
+    val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False,
+                            num_workers=num_workers, collate_fn=collate_fn,
+                            persistent_workers=num_workers > 0, pin_memory=True)
+    print(f"[mixed] real={n_real} synth={n_synth} target_real_frac={rf} "
+          f"samples/epoch={num_samples}", flush=True)
+    return train_loader, val_loader
+
+
 def fit(stage: str, manifest_csv: str, learning_rate: float, max_epochs: int,
         out_dir: str, init_ckpt: Optional[str] = None,
         batch_size: int = 8, seq_length: int = 512, num_workers: int = 4,
-        precision: str = "16-mixed") -> str:
-    train_loader, val_loader = make_pdmx_loaders(manifest_csv, seq_length, batch_size, num_workers)
+        precision: str = "16-mixed", dataset_type: str = "pdmx",
+        real_fraction: float = 0.8, data_dir: str = "./data/") -> str:
+    if dataset_type == "asap":
+        train_loader, val_loader = make_asap_loaders(
+            seq_length, batch_size, num_workers, data_dir=data_dir)
+    elif dataset_type == "mixed":
+        assert manifest_csv, "--manifest (synthetic) required for --dataset-type mixed"
+        train_loader, val_loader = make_mixed_loaders(
+            manifest_csv, seq_length, batch_size, num_workers,
+            real_fraction=real_fraction, data_dir=data_dir)
+    else:
+        assert manifest_csv, "--manifest required for --dataset-type pdmx"
+        train_loader, val_loader = make_pdmx_loaders(manifest_csv, seq_length, batch_size, num_workers)
 
     steps_per_epoch = max(1, len(train_loader.dataset) // batch_size)
     total_steps = steps_per_epoch * max_epochs
@@ -383,8 +468,17 @@ def main() -> None:
     p.add_argument("--out", type=Path, default=Path("checkpoints/lr_range_test.csv"))
 
     p = sub.add_parser("fit", help="Train a stage")
-    p.add_argument("--stage", choices=["pretrain_pdmx", "finetune_asap"], required=True)
-    p.add_argument("--manifest", required=True)
+    p.add_argument("--stage", required=True)
+    p.add_argument("--manifest", default=None,
+                   help="Synthetic PDMX manifest (required for pdmx/mixed dataset-type).")
+    p.add_argument("--dataset-type", choices=["pdmx", "asap", "mixed"], default="pdmx",
+                   help="pdmx=synthetic only; asap=real ASAP only; "
+                        "mixed=real-majority replay (real ASAP + synthetic).")
+    p.add_argument("--real-fraction", type=float, default=0.8,
+                   help="For --dataset-type mixed: target fraction of REAL samples "
+                        "per batch (0.8 = 80%% real / 20%% synthetic).")
+    p.add_argument("--data-dir", default="./data/",
+                   help="ASAP/ACPAS data root (for asap/mixed).")
     p.add_argument("--lr", type=float, required=True)
     p.add_argument("--max-epochs", type=int, default=5)
     p.add_argument("--init-ckpt", default=None)
@@ -408,7 +502,8 @@ def main() -> None:
         ckpt = fit(args.stage, args.manifest, args.lr, args.max_epochs, args.out_dir,
                    init_ckpt=args.init_ckpt, batch_size=args.batch_size,
                    seq_length=args.seq_length, num_workers=args.num_workers,
-                   precision=args.precision)
+                   precision=args.precision, dataset_type=args.dataset_type,
+                   real_fraction=args.real_fraction, data_dir=args.data_dir)
         print(f"Best ckpt: {ckpt}")
 
 

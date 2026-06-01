@@ -120,7 +120,17 @@ def make_measures(midi, midi_score, mxl, annots, swap=True):
 
 
 def handle_file(midi_path, mxl_path, save_path):
-    annots = annotations[midi_path.replace("./data/asap-dataset/", "")]
+    # Annotation keys are relative to the asap-dataset root (e.g.
+    # "Liszt/Transcendental_Etudes/10/Goldberg02.mid"). ASAPDataset hands us paths
+    # as "data/asap-dataset/..." (no leading "./"), so strip whichever prefix is
+    # present — the original "./data/asap-dataset/"-only replace silently KeyError'd
+    # on every not-yet-chunked file.
+    key = midi_path
+    for pre in ("./data/asap-dataset/", "data/asap-dataset/"):
+        if key.startswith(pre):
+            key = key[len(pre):]
+            break
+    annots = annotations[key]
     if not annots["score_and_performance_aligned"]:
         return
     import warnings
