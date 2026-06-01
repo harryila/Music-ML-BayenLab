@@ -37,6 +37,7 @@ class ASAPDataset(Dataset):
         return_continous: bool = False,
         return_paths: bool = False,
         id: str="diffusion_2024_04_18",
+        use_beat_conditioning: bool = False,
     ):
         """
         Parameters
@@ -81,7 +82,13 @@ class ASAPDataset(Dataset):
         self.return_continous = return_continous
         self.return_paths = return_paths
         self.id = id
+        self.use_beat_conditioning = use_beat_conditioning
         self.metadata = self._load_metadata(data_dir, split)
+        # For beat-conditioning, keep ASAP's ground-truth performance_beats per piece.
+        self._beat_annotations = None
+        if use_beat_conditioning:
+            self._beat_annotations = json.load(
+                open(data_dir + "/asap-dataset/asap_annotations.json"))
 
         if self.cache:
             os.makedirs(os.path.join(data_dir, "cache"), exist_ok=True)
@@ -190,6 +197,28 @@ class ASAPDataset(Dataset):
         if self.return_continous:
             return input_stream, output_stream
 
+        # Beat-conditioning: compute per-note phase-within-beat from ASAP's GT beats,
+        # add it to input_stream so bucket_midi emits the 'beat' one-hot. (Onset times
+        # are in seconds here; jitter/tempo augmentation above scaled them, but the
+        # beats are in the same un-augmented frame, so we use the cached onsets' frame —
+        # i.e. compute phase BEFORE tempo/onset jitter would ideally be cleaner, but the
+        # phase is scale-invariant within a beat interval so mild jitter is tolerable.)
+        if self.use_beat_conditioning and self._beat_annotations is not None:
+            from beat_features import phase_features
+            rel = sample_path
+            for pre in ("./data/asap-dataset/", f"{self.data_dir}asap-dataset/", "data/asap-dataset/"):
+                if rel.startswith(pre):
+                    rel = rel[len(pre):]
+                    break
+            ann = self._beat_annotations.get(rel)
+            onsets = input_stream["onset"].numpy()
+            if ann and ann.get("performance_beats") and len(ann["performance_beats"]) >= 2:
+                ph = phase_features(onsets, ann["performance_beats"], downbeats=None)[:, 0]
+                input_stream["beat_phase"] = torch.from_numpy(ph)
+                # validity: notes within the beat span (others -> no-beat bucket)
+                b = ann["performance_beats"]
+                valid = (onsets >= b[0]) & (onsets <= b[-1])
+                input_stream["beat_valid"] = torch.from_numpy(valid)
         input_stream = MultistreamTokenizer.bucket_midi(input_stream)
         output_stream = MultistreamTokenizer.bucket_mxl(output_stream)
 

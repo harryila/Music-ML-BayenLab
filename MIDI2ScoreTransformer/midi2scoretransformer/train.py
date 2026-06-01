@@ -242,16 +242,32 @@ def _new_model(learning_rate: float = 3e-4, total_steps: int = 40000,
     return model
 
 
-def load_pretrained_init(ckpt_path: Optional[str] = None) -> Optional[TrainableRoformer]:
-    """Initialise from a released checkpoint (warm-start) instead of from scratch."""
+def load_pretrained_init(ckpt_path: Optional[str] = None,
+                         use_beat_conditioning: bool = False):
+    """Initialise from a released checkpoint (warm-start). If use_beat_conditioning,
+    add a zero-init 'beat' input Linear on the encoder (byte-identical to baseline)."""
     if ckpt_path is None or not os.path.exists(ckpt_path):
         return None
     base = Roformer.load_from_checkpoint(ckpt_path, map_location="cpu", weights_only=False)
     enc = base.enc_config
     dec = base.dec_config
     hp = base.hyperparameters
+    if use_beat_conditioning:
+        # Enable the beat input on the ENCODER only (the MIDI side). The released
+        # checkpoint lacks the 'beat' Linear; build it fresh, load the rest via
+        # strict=False, then ZERO-init it so the warm-started model is byte-identical
+        # to the released checkpoint until training learns to use the beat signal.
+        enc.use_beat_conditioning = True
+        if not hasattr(enc, "in_beat_vocab_size"):
+            enc.in_beat_vocab_size = 13
     model = TrainableRoformer(enc_configuration=enc, dec_configuration=dec, hyperparameters=hp)
     model.load_state_dict(base.state_dict(), strict=False)
+    if use_beat_conditioning:
+        with torch.no_grad():
+            emb = model.embeddings_enc.embeddings["beat"]
+            emb.weight.zero_()
+            if emb.bias is not None:
+                emb.bias.zero_()
     return model
 
 
@@ -326,7 +342,8 @@ _REAL_AUG = {"transpose": True, "random_crop": True, "tempo_jitter": (0.8, 1.2),
 
 
 def make_asap_loaders(seq_length: int = 512, batch_size: int = 16,
-                      num_workers: int = 8, data_dir: str = "./data/"):
+                      num_workers: int = 8, data_dir: str = "./data/",
+                      use_beat_conditioning: bool = False):
     """Real ASAP (perf-MIDI, engraved-MusicXML) pairs via the upstream ASAPDataset.
 
     The released model was trained on ASAP; this lets us continue-train on the full
@@ -335,9 +352,11 @@ def make_asap_loaders(seq_length: int = 512, batch_size: int = 16,
     """
     from dataset import ASAPDataset
     train_ds = ASAPDataset(data_dir, "train", seq_length=seq_length,
-                           padding="per-beat", augmentations=_REAL_AUG)
+                           padding="per-beat", augmentations=_REAL_AUG,
+                           use_beat_conditioning=use_beat_conditioning)
     val_ds = ASAPDataset(data_dir, "validation", seq_length=seq_length,
-                         padding="per-beat", augmentations={})
+                         padding="per-beat", augmentations={},
+                         use_beat_conditioning=use_beat_conditioning)
     train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True,
                               num_workers=num_workers, collate_fn=collate_fn,
                               persistent_workers=num_workers > 0, pin_memory=True)
@@ -398,10 +417,12 @@ def fit(stage: str, manifest_csv: str, learning_rate: float, max_epochs: int,
         out_dir: str, init_ckpt: Optional[str] = None,
         batch_size: int = 8, seq_length: int = 512, num_workers: int = 4,
         precision: str = "16-mixed", dataset_type: str = "pdmx",
-        real_fraction: float = 0.8, data_dir: str = "./data/") -> str:
+        real_fraction: float = 0.8, data_dir: str = "./data/",
+        use_beat_conditioning: bool = False) -> str:
     if dataset_type == "asap":
         train_loader, val_loader = make_asap_loaders(
-            seq_length, batch_size, num_workers, data_dir=data_dir)
+            seq_length, batch_size, num_workers, data_dir=data_dir,
+            use_beat_conditioning=use_beat_conditioning)
     elif dataset_type == "mixed":
         assert manifest_csv, "--manifest (synthetic) required for --dataset-type mixed"
         train_loader, val_loader = make_mixed_loaders(
@@ -415,7 +436,7 @@ def fit(stage: str, manifest_csv: str, learning_rate: float, max_epochs: int,
     total_steps = steps_per_epoch * max_epochs
 
     if init_ckpt and os.path.exists(init_ckpt):
-        model = load_pretrained_init(init_ckpt)
+        model = load_pretrained_init(init_ckpt, use_beat_conditioning=use_beat_conditioning)
         if model is None:
             model = _new_model(learning_rate=learning_rate,
                                warmup_steps=max(100, total_steps // 50),
@@ -479,6 +500,9 @@ def main() -> None:
                         "per batch (0.8 = 80%% real / 20%% synthetic).")
     p.add_argument("--data-dir", default="./data/",
                    help="ASAP/ACPAS data root (for asap/mixed).")
+    p.add_argument("--use-beat-conditioning", action="store_true",
+                   help="Add per-note beat-phase conditioning input (fixes tuplet/meter "
+                        "failure). Warm-start adds a zero-init beat Linear; trains from ASAP GT beats.")
     p.add_argument("--lr", type=float, required=True)
     p.add_argument("--max-epochs", type=int, default=5)
     p.add_argument("--init-ckpt", default=None)
@@ -503,7 +527,8 @@ def main() -> None:
                    init_ckpt=args.init_ckpt, batch_size=args.batch_size,
                    seq_length=args.seq_length, num_workers=args.num_workers,
                    precision=args.precision, dataset_type=args.dataset_type,
-                   real_fraction=args.real_fraction, data_dir=args.data_dir)
+                   real_fraction=args.real_fraction, data_dir=args.data_dir,
+                   use_beat_conditioning=args.use_beat_conditioning)
         print(f"Best ckpt: {ckpt}")
 
 

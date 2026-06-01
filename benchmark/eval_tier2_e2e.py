@@ -51,9 +51,11 @@ PIECES = [
     {"name": "Chopin_Op25_No11", "dist": "in-dist (ASAP train)",
      "audio": REPO / "benchmark/chopin_op25/audio/Op25_No11_Aminor.wav",
      "gt": ASAP / "Chopin/Etudes_op_25/11/xml_score.musicxml"},
-    {"name": "Liszt_Mazeppa", "dist": "OUT-OF-DIST (sourced GT)",
+    {"name": "Liszt_Mazeppa", "dist": "dense (in ASAP train)",
      "audio": REPO / "benchmark/liszt_transcendental/audio/Transcendental_No4_Mazeppa.wav",
-     "gt": REPO / "benchmark/liszt_transcendental/gt_score.musicxml"},
+     # ASAP edition (model trained on it) — the PDMX community score inflated MUSTER
+     # ~2x via edition mismatch (34 vs ~14), not real model error. See DECOMPOSED_FINDINGS.md.
+     "gt": ASAP / "Liszt/Transcendental_Etudes/4/xml_score.musicxml"},
 ]
 
 MUSTER_KEYS = ["PitchER", "MissRate", "ExtraRate", "OnsetER", "OffsetER", "MeanER"]

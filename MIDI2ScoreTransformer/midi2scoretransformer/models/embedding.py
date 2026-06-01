@@ -11,13 +11,22 @@ class MIDIEmbeddings(nn.Module):
     """Construct embeddings given 5 one-hot input token streams."""
     def __init__(self, config):
         super().__init__()
-        self.embeddings = nn.ParameterDict({
+        streams = {
             "onset": nn.Linear(config.in_onset_vocab_size, config.embedding_size, bias=config.bias),
             "duration": nn.Linear(config.in_duration_vocab_size, config.embedding_size, bias=config.bias),
             "pitch": nn.Linear(config.in_pitch_vocab_size, config.embedding_size, bias=config.bias),
             "velocity": nn.Linear(config.in_velocity_vocab_size, config.embedding_size, bias=config.bias),
             "unconditional": nn.Linear(1, config.embedding_size, bias=False),
-        })
+        }
+        # Beat-conditioning (opt-in): per-note phase-within-beat (12 sub-beat ticks +
+        # no-beat). Only built when config.use_beat_conditioning is True, so the released
+        # checkpoint (which lacks the flag → defaults False) loads strict-clean and is
+        # unchanged. forward() only sums streams present in input_streams; zero-init at
+        # warm-start (train.py) keeps the baseline byte-identical until it learns to use it.
+        if getattr(config, "use_beat_conditioning", False):
+            streams["beat"] = nn.Linear(getattr(config, "in_beat_vocab_size", 13),
+                                        config.embedding_size, bias=config.bias)
+        self.embeddings = nn.ParameterDict(streams)
         self.layer_norm = nn.LayerNorm(config.embedding_size, eps=config.layer_norm_eps, bias=config.bias)
         self.dropout = nn.Dropout(config.hidden_dropout_prob)
         self.config = config

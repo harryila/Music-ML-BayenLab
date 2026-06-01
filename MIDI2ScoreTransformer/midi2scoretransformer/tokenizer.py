@@ -116,11 +116,25 @@ class MultistreamTokenizer:
         # fmt: on
         pitch_stream = one_hot_bucketing(midi_streams["pitch"], 0, 127, 128)
         velocity_stream = one_hot_bucketing(midi_streams["velocity"], 0, 127, 8)
+        # Beat-conditioning stream (12 sub-beat ticks + no-beat bucket). If a
+        # precomputed per-note 'beat_phase' in [0,1) is supplied (from ASAP beats at
+        # train time, or a tracker at inference), bucket it; otherwise emit all-no-beat
+        # so every code path yields the 'beat' key (required by cat_dict / the model).
+        from beat_features import bucket_beat_phase, no_beat_stream
+        n = onset_stream.shape[0]
+        if "beat_phase" in midi_streams and midi_streams["beat_phase"] is not None:
+            bp = midi_streams["beat_phase"]
+            valid = midi_streams.get("beat_valid", None)
+            beat_stream = bucket_beat_phase(bp.numpy() if hasattr(bp, "numpy") else bp,
+                                            valid=valid.numpy() if hasattr(valid, "numpy") else valid)
+        else:
+            beat_stream = no_beat_stream(n)
         return {
             "onset": onset_stream.float(),
             "duration": duration_stream.float(),
             "pitch": pitch_stream.float(),
             "velocity": velocity_stream.float(),
+            "beat": beat_stream.float(),
             "pad": torch.ones((onset_stream.shape[0],), dtype=torch.long),
         }
 

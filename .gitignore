@@ -25,9 +25,15 @@ benchmark/*/path_c/
 
 # Synthetic pretrain bulk — all regenerable from scripts/
 data/pairs/
+data/pairs_deduped_*/
 data/cache_pdmx/
+data/cache_pdmx_*/
 data/pdmx_piano_subset.csv
+data/pdmx_piano_subset.deduped.csv
 data/render_test/
+
+# ASAP parse-cache (regenerable via build_asap_cache.py / dataset.py; ~5MB of pkls)
+MIDI2ScoreTransformer/data/cache/
 
 # ASAP dataset clone (regenerable: clone TimFelixBeyer/asap-dataset at the
 # pinned commit, see MIDI2ScoreTransformer/README.md)
@@ -45,3 +51,5 @@ benchmark/pretrain_eval/
 
 # IDE
 .cursor/
+benchmark/decomp_work/
+benchmark/tier2_out/
