@@ -30,7 +30,7 @@ class BaseModel(pl.LightningModule):
         )
 
     @torch.no_grad()
-    def generate(self, x, y=None, max_length=512, temperature=1.0, top_k=1, kv_cache=False) -> dict[str, torch.Tensor]:
+    def generate(self, x, y=None, max_length=512, temperature=1.0, top_k=1, kv_cache=False, head_overrides=None) -> dict[str, torch.Tensor]:
         """Generate a sequence of tokens from the model.
         If y with T timesteps is provided, only max_length - T tokens will be generated.
         The first T tokens will be y_hist.
@@ -78,6 +78,10 @@ class BaseModel(pl.LightningModule):
                 past_key_values=None,
                 use_cache=True
             )[1]
+        # Side channels for a *live* pad threshold (see end of fn): the continuous keep
+        # probability per slot, and the un-zeroed per-stream predictions.
+        pad_prob_steps = []
+        raw_steps = {k: [] for k in y_start_token if k != "pad"}
         for _ in range(max_length + 1 - y["pad"].shape[1]):
             if kv_cache:
                 y_pred, past_key_values = self.forward_dec(
@@ -95,10 +99,14 @@ class BaseModel(pl.LightningModule):
                     encoder_attention_mask=encoder_attention_mask,
                 )
             for k in y.keys():
+                # Per-head decoding override: head_overrides maps a stream name to its own
+                # (top_k, temperature). A missing key falls back to the global pair; the
+                # default head_overrides=None is byte-identical to the single-knob behavior.
+                _tk, _temp = head_overrides.get(k, (top_k, temperature)) if head_overrides else (top_k, temperature)
                 # forward the model to get the logits for the index in the sequence
                 logits = y_pred[k]
                 # pluck the logits at the final step and scale by desired temperature
-                logits = logits[:, -1, :] / temperature
+                logits = logits[:, -1, :] / _temp
                 # ensure that we sample a downbeat wherever the offset decreases, since that guarantees a measure change!
                 if k == "downbeat" and y["offset"].shape[1] > 1:
                     is_downbeat = y_pred["offset"][:, -1].argmax(-1) < y["offset"][:, -2].argmax(-1)
@@ -125,8 +133,8 @@ class BaseModel(pl.LightningModule):
                         options = impossible_accidentals[predicted_pitch.item() % 12] + never_allowed
                         logits[i, options] = float("-inf")
                 # optionally crop the logits to only the top k options
-                if top_k is not None:
-                    v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
+                if _tk is not None:
+                    v, _ = torch.topk(logits, min(_tk, logits.size(-1)))
                     logits[logits < v[:, [-1]]] = -float("Inf")
                 # apply softmax to convert logits to (normalized) probabilities
                 probs = (
@@ -139,6 +147,11 @@ class BaseModel(pl.LightningModule):
                 # sample from the distribution
                 # next_token = torch.searchsorted(torch.cumsum(probs, dim=-1), torch.rand((B, 1)).to(probs.device)) # 660 tok/s
                 if k == "pad":  # special case + NO ARGMAX sampling
+                    # probs == [1 - sigmoid, sigmoid]; column 1 is the continuous
+                    # keep-probability. Stash it BEFORE the hard argmax so detokenize can
+                    # threshold on it (otherwise the binary stream makes --pad-threshold a
+                    # no-op). AR feedback below is unchanged (still the 0.5 argmax).
+                    pad_prob_steps.append(probs[:, 1:2])
                     next_token = probs.argmax(-1, keepdim=True)
                     y[k] = torch.cat([y[k], next_token], dim=1)
                 else:
@@ -146,6 +159,10 @@ class BaseModel(pl.LightningModule):
                     next_token = F.one_hot(
                         next_token, num_classes=y_pred[k].shape[-1]
                     )
+                    # Keep the un-zeroed prediction: the in-loop masking below zeroes
+                    # dropped slots in `y` (for AR feedback), which would otherwise destroy
+                    # the predictions we want to recover when the threshold is lowered.
+                    raw_steps[k].append(next_token)
                     y[k] = torch.cat([y[k], next_token], dim=1)
 
             # set other tokens zero where mask
@@ -158,4 +175,23 @@ class BaseModel(pl.LightningModule):
         for k in y.keys():
             y[k] = y[k][:, 1:]
         y["pad"] = y["pad"].unsqueeze(-1).float()
+        # --- Continuous pad keep-probability + un-zeroed streams (additive, opt-in) ---
+        # `pad_prob` lets detokenize_mxl threshold on a *soft* keep-probability, and the
+        # `raw_*` streams carry the real predictions for slots the 0.5 argmax dropped.
+        # At pad_threshold=0.5 the soft mask reproduces the hard argmax exactly and the
+        # rescued streams coincide with the kept ones, so default behaviour is unchanged.
+        target_len = y["pad"].shape[1]
+        pp = (
+            torch.cat(pad_prob_steps, dim=1).unsqueeze(-1)
+            if pad_prob_steps else y["pad"].new_zeros((B, 0, 1))
+        )
+        n_ctx = target_len - pp.shape[1]
+        if n_ctx > 0:  # prepend context placeholders (sliced away by infer's overlap logic)
+            pp = torch.cat([y["pad"][:, :n_ctx], pp], dim=1)
+        y["pad_prob"] = pp
+        for k in raw_steps:
+            rk = torch.cat(raw_steps[k], dim=1) if raw_steps[k] else y[k][:, :0]
+            if n_ctx > 0:
+                rk = torch.cat([y[k][:, :n_ctx], rk], dim=1)
+            y["raw_" + k] = rk
         return y

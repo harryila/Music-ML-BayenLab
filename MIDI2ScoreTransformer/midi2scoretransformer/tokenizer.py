@@ -460,21 +460,29 @@ class MultistreamTokenizer:
         music21.stream.Stream
             music21 stream that can be saved to musicxml.
         """
-        mask = token_dict["pad"].squeeze() > pad_threshold  # allow for prediction/soft values
+        # Prefer the continuous keep-probability when generate() supplies it, so the
+        # threshold is actually live (the plain "pad" stream is a hard 0.5 argmax, which
+        # makes any threshold in (0,1) a no-op). Likewise prefer the un-zeroed "raw_*"
+        # streams so slots rescued below 0.5 carry their real predictions. Falls back to
+        # the legacy binary stream when those keys are absent (e.g. teacher forcing).
+        pad_src = token_dict["pad_prob"] if "pad_prob" in token_dict else token_dict["pad"]
+        mask = pad_src.squeeze() > pad_threshold  # allow for prediction/soft values
+        def _s(name):
+            return token_dict.get("raw_" + name, token_dict[name])
         # fmt: off
-        offset_stream = one_hot_unbucketing(token_dict["offset"][mask], **PARAMS["offset"]).numpy().astype(float)
-        duration_stream = one_hot_unbucketing(token_dict["duration"][mask], **PARAMS["duration"]).numpy().astype(float)
-        downbeat_stream = one_hot_unbucketing(token_dict["downbeat"][mask], **PARAMS["downbeat"]).numpy().astype(float)
-        pitch_stream = one_hot_unbucketing(token_dict["pitch"][mask], 0, 127, 128).numpy().astype(int)
-        accidental_stream = one_hot_unbucketing(token_dict["accidental"][mask][:, :6], 0, 6, 7).numpy().astype(int)
-        keysignature_stream = one_hot_unbucketing(token_dict["keysignature"][mask], 0, 15, 16).numpy().astype(int)
-        velocity_stream = one_hot_unbucketing(token_dict["velocity"][mask], 0, 127, 8).numpy().astype(int)
-        grace_stream = one_hot_unbucketing(token_dict["grace"][mask], 0, 1, 2).numpy().astype(bool)
-        trill_stream = one_hot_unbucketing(token_dict["trill"][mask], 0, 1, 2).numpy().astype(bool)
-        staccato_stream = one_hot_unbucketing(token_dict["staccato"][mask], 0, 1, 2).numpy().astype(bool)
-        voice_stream = one_hot_unbucketing(token_dict["voice"][mask][:, 1:], 1, 8, 8).numpy().astype(int)
-        stem_stream = one_hot_unbucketing(token_dict["stem"][mask][:, :3], 0, 3, 4).numpy().astype(int)
-        hand_stream = one_hot_unbucketing(token_dict["hand"][mask][:, :2], 0, 2, 3).numpy().astype(int)
+        offset_stream = one_hot_unbucketing(_s("offset")[mask], **PARAMS["offset"]).numpy().astype(float)
+        duration_stream = one_hot_unbucketing(_s("duration")[mask], **PARAMS["duration"]).numpy().astype(float)
+        downbeat_stream = one_hot_unbucketing(_s("downbeat")[mask], **PARAMS["downbeat"]).numpy().astype(float)
+        pitch_stream = one_hot_unbucketing(_s("pitch")[mask], 0, 127, 128).numpy().astype(int)
+        accidental_stream = one_hot_unbucketing(_s("accidental")[mask][:, :6], 0, 6, 7).numpy().astype(int)
+        keysignature_stream = one_hot_unbucketing(_s("keysignature")[mask], 0, 15, 16).numpy().astype(int)
+        velocity_stream = one_hot_unbucketing(_s("velocity")[mask], 0, 127, 8).numpy().astype(int)
+        grace_stream = one_hot_unbucketing(_s("grace")[mask], 0, 1, 2).numpy().astype(bool)
+        trill_stream = one_hot_unbucketing(_s("trill")[mask], 0, 1, 2).numpy().astype(bool)
+        staccato_stream = one_hot_unbucketing(_s("staccato")[mask], 0, 1, 2).numpy().astype(bool)
+        voice_stream = one_hot_unbucketing(_s("voice")[mask][:, 1:], 1, 8, 8).numpy().astype(int)
+        stem_stream = one_hot_unbucketing(_s("stem")[mask][:, :3], 0, 3, 4).numpy().astype(int)
+        hand_stream = one_hot_unbucketing(_s("hand")[mask][:, :2], 0, 2, 3).numpy().astype(int)
 
         if midi_sequence is not None:
             midi_sequence = [m for i, m in enumerate(midi_sequence) if mask[i]]

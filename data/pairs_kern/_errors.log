@@ -1,0 +1,17 @@
+k2cc623ff776a	convert:AttributeError: 'Dynamic' object has no attribute 'humdrumPosition'	/root/kern_corpus/Mysterium/ccarh_kern/scriabin-op11_no04.krn
+k233511c2b4aa	convert:AttributeError: 'Dynamic' object has no attribute 'humdrumPosition'	/root/kern_corpus/Mysterium/op06/scriabin-op06_no01.krn
+k62bcfc764753	convert:AttributeError: 'Dynamic' object has no attribute 'humdrumPosition'	/root/kern_corpus/Mysterium/op06/scriabin-op06_no03.krn
+k0c32c73fe2ec	convert:AttributeError: 'Dynamic' object has no attribute 'humdrumPosition'	/root/kern_corpus/Mysterium/op08/scriabin-op08_no07.krn
+k196ac3931c4c	convert:AttributeError: 'Dynamic' object has no attribute 'humdrumPosition'	/root/kern_corpus/Mysterium/op11/scriabin-op11_no18.krn
+k7b7cf6b7f90a	convert:AttributeError: 'Dynamic' object has no attribute 'humdrumPosition'	/root/kern_corpus/Mysterium/op12/scriabin-op12_no02.krn
+k4d83adc6d709	convert:AttributeError: 'Dynamic' object has no attribute 'humdrumPosition'	/root/kern_corpus/Mysterium/op14/scriabin-op14_no01.krn
+kcbdd01f8bfd2	convert:AttributeError: 'Dynamic' object has no attribute 'humdrumPosition'	/root/kern_corpus/Mysterium/op14/scriabin-op14_no02.krn
+k9ceea18bd79b	convert:AttributeError: 'Dynamic' object has no attribute 'humdrumPosition'	/root/kern_corpus/Mysterium/op15/scriabin-op15_no04.krn
+k19f04b1a761b	convert:AttributeError: 'Dynamic' object has no attribute 'humdrumPosition'	/root/kern_corpus/Mysterium/op16/scriabin-op16_no01.krn
+k11af8b2e9ae6	convert:AttributeError: 'Dynamic' object has no attribute 'humdrumPosition'	/root/kern_corpus/Mysterium/op17/scriabin-op17_no02.krn
+k246228e0ca3e	convert:AttributeError: 'Dynamic' object has no attribute 'humdrumPosition'	/root/kern_corpus/Mysterium/op19/scriabin-op19_no01.krn
+k5b8cbbb34ea0	convert:AttributeError: 'Dynamic' object has no attribute 'humdrumPosition'	/root/kern_corpus/Mysterium/op21/scriabin-op21.krn
+k42db278df766	convert:AttributeError: 'Dynamic' object has no attribute 'humdrumPosition'	/root/kern_corpus/Mysterium/op23/scriabin-op23_no01.krn
+k0f3940916806	convert:AttributeError: 'Dynamic' object has no attribute 'humdrumPosition'	/root/kern_corpus/Mysterium/op66/scriabin-op66.krn
+k4604a1bd586c	convert:AttributeError: 'Dynamic' object has no attribute 'humdrumPosition'	/root/kern_corpus/Mysterium/op69/scriabin-op69_no02.krn
+k3c08a1a22456	convert:MusicXMLExportException: In part (P3-Staff3), measure (222): Cannot convert complex durations to MusicXML. Try exporting with makeNotation=True or manually running splitAtDurations()	/root/kern_corpus/Mysterium/op70/scriabin-op70.krn
