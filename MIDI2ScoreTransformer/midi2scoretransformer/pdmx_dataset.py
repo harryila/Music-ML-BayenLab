@@ -52,6 +52,8 @@ class PDMXDataset(Dataset):
         return_continous: bool = False,
         return_paths: bool = False,
         seed: int = 42,
+        tuplet_gamma: float = 0.0,
+        tuplet_floor: float = 0.05,
     ):
         super().__init__()
         assert split in ("all", "train", "validation", "val")
@@ -88,6 +90,17 @@ class PDMXDataset(Dataset):
         except Exception:
             self.lengths = torch.ones(len(self.metadata))
 
+        # Tuplet-rate RESHAPE: the unpaired classical corpus is ~86% tuplet-free, which collapses
+        # the model's tuplet prior. With tuplet_gamma>0, upweight tuplet-rich scores in the
+        # length-based resampling so the effective corpus tuplet-rate is lifted (calibrate the
+        # prior via the data distribution rather than a blunt global loss weight). gamma=0 => the
+        # original length-only weighting (byte-identical). Requires a `tuplet_rate` manifest column.
+        self.tuplet_gamma = float(tuplet_gamma)
+        self._resample_w = self.lengths
+        if self.tuplet_gamma > 0 and "tuplet_rate" in self.metadata.columns:
+            tr = torch.FloatTensor(self.metadata["tuplet_rate"].fillna(0.0).values.astype(float))
+            self._resample_w = self.lengths * torch.pow(tr + float(tuplet_floor), self.tuplet_gamma)
+
     def __len__(self) -> int:
         return len(self.metadata)
 
@@ -112,7 +125,7 @@ class PDMXDataset(Dataset):
 
     def __getitem__(self, idx: int):
         if self.split == "train":
-            idx = int(torch.multinomial(self.lengths, 1, replacement=True).item())
+            idx = int(torch.multinomial(self._resample_w, 1, replacement=True).item())
         sample = self.metadata.iloc[idx]
         sample_path = sample["midi"]
         chunks_path = sample["chunks"]
@@ -222,3 +235,30 @@ class PDMXDataset(Dataset):
             mxl_path = sample["mxl"] if "mxl" in sample else sample_path.replace(".mid", ".musicxml")
             return new_input_stream, new_output_stream, sample_path, mxl_path
         return new_input_stream, new_output_stream
+
+
+class UnpairedScoreDataset(PDMXDataset):
+    """Masked self-supervision over real engraved scores (the released model's recipe).
+
+    Reuses the existing PDMX caches but treats each score as UNPAIRED (no real performance):
+    the encoder receives a SURROGATE input = the score's own pitch (which, in our 1:1 rendered
+    pairs, IS the cached input pitch) with onset/duration/velocity MASKED to constants. The
+    decoder target is the score itself. The conditioning token c_i is added by the loader's
+    _WithConditioning wrapper (=1 here). This is the path the released checkpoint used for its
+    58k unpaired MuseScore scores (Beyer & Dai 2024, sec 3.1.2; surrogate pitch is worth
+    +1.84 E_avg vs zeroing the encoder, Table 6 row 8).
+
+    Only _load_pair changes; all of PDMXDataset's chunking / crop / pad / augmentation machinery
+    is reused unchanged (transposition still shifts input+output pitch together, keeping them
+    consistent; timing augmentations are no-ops on the masked streams).
+    """
+
+    def _load_pair(self, sample_path: str) -> Tuple[Dict, Dict]:
+        input_stream, output_stream = super()._load_pair(sample_path)
+        # Keep the (score) pitch; mask the performance-specific channels so the model must
+        # recover the score from pitch + musical context, not invert a real performance.
+        input_stream = dict(input_stream)
+        input_stream["onset"] = torch.zeros_like(input_stream["onset"])
+        input_stream["duration"] = torch.zeros_like(input_stream["duration"])
+        input_stream["velocity"] = torch.full_like(input_stream["velocity"], 64)
+        return input_stream, output_stream

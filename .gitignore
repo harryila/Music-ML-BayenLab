@@ -11,6 +11,7 @@ __pycache__/
 
 # Model checkpoints (too large for git — download separately)
 MIDI2ScoreTransformer/checkpoints/
+checkpoints_backup/
 mt3/checkpoints/
 hFT-Transformer/checkpoint/
 

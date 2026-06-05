@@ -47,15 +47,28 @@ log = logging.getLogger(__name__)
 @dataclass
 class Perturbations:
     """Per-piece perturbation knobs. All randomized via the seed."""
-    tempo_walk_std: float = 0.10        # ~N(1.0, 0.10) per-bar multiplier
-    tempo_smooth_window: int = 3         # bars of moving average over the walk
+    tempo_walk_std: float = 0.10        # ~N(1.0, 0.10) per-bar multiplier (legacy, unused by beat curve)
+    tempo_smooth_window: int = 3         # bars of moving average over the walk (legacy)
     velocity_offset_std: float = 10.0    # per-note velocity ~N(0, 10)
     phrase_loudness_amp: int = 15        # phrase-level cosine envelope ±15
     phrase_length_bars: int = 8
-    onset_jitter_seconds: float = 0.020  # ±20 ms gaussian (per chord, not per note)
+    onset_jitter_seconds: float = 0.022  # ±22 ms gaussian (per chord, not per note)
     duration_scale_std: float = 0.05     # multiplicative N(1, 0.05)
     early_release_prob: float = 0.05
     early_release_factor: float = 0.7
+    # --- realistic-rubato model (beat-resolution tempo curve) ---
+    # The legacy renderer held tempo CONSTANT within each bar, so tuplets landed at
+    # exactly 1/N of the beat. Real rubato varies tempo within the bar and slows into
+    # cadences, so the inverse (timing -> tuplet notation) the model must learn is
+    # different at test time than what deadpan-within-bar rendering teaches. These knobs
+    # add structured sub-beat rubato + phrase-final ritardando. All affect only the shared
+    # quarter-length->seconds map, so chord-internal note order is still preserved.
+    beat_tempo_std: float = 0.08         # per-(quarter)beat tempo multiplier ~N(1, 0.08)
+    beat_grid_ql: float = 0.25           # tempo-curve sampling resolution (quarter-lengths)
+    beat_smooth_window: int = 5          # grid points of moving average (~1.25 beats)
+    ritard_factor: float = 0.72          # tempo multiplier reached at a phrase end (slower)
+    ritard_window_ql: float = 2.0        # quarter-lengths before a phrase end over which to slow
+    use_beat_rubato: bool = True         # False -> fall back to the legacy per-bar tempo walk
 
 
 def _measure_starts_ql(score) -> list[float]:
@@ -69,9 +82,7 @@ def _measure_starts_ql(score) -> list[float]:
     return sorted(starts)
 
 
-def _build_q_to_s(score, perturb: Perturbations, rng: random.Random,
-                  max_ql: float) -> callable:
-    """Build a quarter-length-to-seconds mapping with a smooth tempo walk per bar."""
+def _base_bpm(score) -> float:
     flat = score.flatten()
     base_bpm = 100.0
     for tempo in flat.getElementsByClass("MetronomeMark"):
@@ -82,6 +93,93 @@ def _build_q_to_s(score, perturb: Perturbations, rng: random.Random,
                 break
         except Exception:
             continue
+    return base_bpm
+
+
+def _build_q_to_s_rubato(score, perturb: Perturbations, rng: random.Random,
+                         max_ql: float) -> callable:
+    """Beat-resolution tempo curve: structured sub-beat rubato + phrase-final ritardando.
+
+    Tempo is sampled on a fine quarter-length grid (beat_grid_ql), each point a smoothed
+    random-walk multiplier on the base tempo, with a ramped slow-down (ritardando) over the
+    final ritard_window_ql of every phrase (phrase_length_bars long). Seconds are the running
+    integral of 60/bpm over the grid, linearly interpolated inside a cell. The map is shared by
+    all notes, so notes at one score offset still get one onset -> chord-internal order preserved.
+    """
+    base_bpm = _base_bpm(score)
+
+    # phrase length in quarter-lengths, from the typical bar size
+    bar_starts = _measure_starts_ql(score)
+    if len(bar_starts) >= 2:
+        diffs = [b - a for a, b in zip(bar_starts[:-1], bar_starts[1:]) if b > a]
+        bar_ql = float(np.median(diffs)) if diffs else 4.0
+    else:
+        bar_ql = 4.0
+    phrase_ql = max(bar_ql, perturb.phrase_length_bars * bar_ql)
+
+    # Tempo is a SMOOTH function of musical time: independent multipliers at per-beat
+    # KNOTS (a smoothed random walk), linearly interpolated in between. Sub-beat timing
+    # (e.g. a triplet inside one beat) then varies only mildly + consistently, while
+    # beat-to-beat rubato is full strength -- matching how real rubato actually behaves.
+    n_knots = int(math.ceil(max_ql)) + 2
+    # mean-reverting AR(1) walk: smooth + autocorrelated like real rubato, and (unlike a
+    # zero-padded moving average) free of slow-start/slow-end edge artifacts. rho sets how
+    # smooth; the innovation std is chosen so the stationary std == beat_tempo_std.
+    rho = 0.6
+    innov = perturb.beat_tempo_std * math.sqrt(1.0 - rho * rho)
+    knot = np.empty(n_knots)
+    prev = 1.0
+    for j in range(n_knots):
+        prev = 1.0 + rho * (prev - 1.0) + rng.gauss(0.0, innov)
+        knot[j] = prev
+
+    # phrase-final ritardando: ramp the knot multiplier toward ritard_factor over the
+    # last ritard_window_ql quarter-lengths before each phrase boundary.
+    win = max(1.0, perturb.ritard_window_ql)
+    for j in range(n_knots):
+        q = float(j)
+        nb = math.ceil((q + 1e-9) / phrase_ql) * phrase_ql
+        dist = nb - q
+        if 0.0 <= dist <= win:
+            frac = 1.0 - (dist / win)          # 0 at window start -> 1 at the boundary
+            knot[j] *= 1.0 + (perturb.ritard_factor - 1.0) * frac
+    knot = np.clip(knot, 0.35, 2.2)
+
+    def mult_at(q: float) -> float:
+        j = int(q)
+        if j >= n_knots - 1:
+            return float(knot[-1])
+        f = q - j
+        return float(knot[j] * (1.0 - f) + knot[j + 1] * f)
+
+    # Integrate 60/bpm on a fine sub-grid so the piecewise-linear tempo gives smooth seconds.
+    grid = max(0.0625, perturb.beat_grid_ql)
+    n = int(math.ceil((max_ql + grid) / grid)) + 1
+    cum = np.zeros(n + 1)
+    for k in range(n):
+        local_bpm = base_bpm * mult_at((k + 0.5) * grid)   # midpoint rule
+        cum[k + 1] = cum[k] + grid * 60.0 / local_bpm
+
+    def q_to_s(q: float) -> float:
+        fk = q / grid
+        k = int(fk)
+        if k >= n:
+            k = n - 1
+        frac = fk - k
+        local_bpm = base_bpm * mult_at((k + 0.5) * grid)
+        return float(cum[k] + frac * grid * 60.0 / local_bpm)
+
+    return q_to_s
+
+
+def _build_q_to_s(score, perturb: Perturbations, rng: random.Random,
+                  max_ql: float) -> callable:
+    """Quarter-length-to-seconds map. Default: realistic beat-resolution rubato.
+    Set perturb.use_beat_rubato=False for the legacy per-bar (deadpan-within-bar) walk."""
+    if perturb.use_beat_rubato:
+        return _build_q_to_s_rubato(score, perturb, rng, max_ql)
+    # ---- legacy per-bar tempo walk (kept for A/B + reproducibility) ----
+    base_bpm = _base_bpm(score)
 
     bar_starts = _measure_starts_ql(score)
     bar_starts = [b for b in bar_starts if b <= max_ql + 0.001]
@@ -139,6 +237,17 @@ def render(mxl_path: Path, out_midi_path: Path, seed: int = 0,
     if not notes_list:
         return {"ok": False, "error": "no_notes_in_score"}
 
+    return render_from_parsed(notes_list, score, out_midi_path, seed, perturb)
+
+
+def render_from_parsed(notes_list, score, out_midi_path: Path, seed: int,
+                       perturb: Perturbations) -> dict:
+    """Render from an ALREADY-PARSED (notes_list, score) pair.
+
+    The music21 parse (mxl_to_list) dominates render cost, so callers that want many
+    rubato realizations of one score should parse it ONCE and call this K times with
+    different seeds — each call only rebuilds the (cheap) tempo curve + writes a MIDI.
+    """
     try:
         rng = random.Random(seed)
         np_rng = np.random.default_rng(seed)

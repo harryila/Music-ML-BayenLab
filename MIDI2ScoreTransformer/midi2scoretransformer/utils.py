@@ -11,8 +11,8 @@ from score_utils import postprocess_score
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
 
-def eval(y_hat, gt_mxl_path: str) -> dict[str, dict[str, float]|None]:
-    mxl = MultistreamTokenizer.detokenize_mxl(y_hat)
+def eval(y_hat, gt_mxl_path: str, pad_threshold: float = 0.5) -> dict[str, dict[str, float]|None]:
+    mxl = MultistreamTokenizer.detokenize_mxl(y_hat, pad_threshold=pad_threshold)
     mxl = postprocess_score(mxl, inPlace=True)
 
     # fmt: off
@@ -67,7 +67,7 @@ def quantize_path(path, model, **kwargs):
 
 
 def infer(x, model, overlap=64, chunk=512, verbose=True, kv_cache=True,
-          top_k: int = 1, temperature: float = 1.0) -> dict[str, torch.Tensor]:
+          top_k: int = 1, temperature: float = 1.0, head_overrides=None) -> dict[str, torch.Tensor]:
     single_example = x['pitch'].ndim == 2
     if single_example:
         x = {k: v.unsqueeze(0) for k, v in x.items()}
@@ -80,12 +80,16 @@ def infer(x, model, overlap=64, chunk=512, verbose=True, kv_cache=True,
             print("Infer", i, "/", x['pitch'].shape[1], end='\r')
         x_chunk = {k: v[:, i:i + chunk] for k, v in x.items()}
         if i == 0 or overlap == 0:  # No context required
-            y_hat = model.generate(x=x_chunk, top_k=top_k, temperature=temperature, max_length=chunk, kv_cache=kv_cache)
+            y_hat = model.generate(x=x_chunk, top_k=top_k, temperature=temperature, max_length=chunk, kv_cache=kv_cache, head_overrides=head_overrides)
         else:
-            # Keep the last 'overlap' notes of the previous chunk as context
-            y_hat_prev = {k: v[:, -overlap:] if k != 'pad' else v[:, -overlap:, 0] for k, v in y_full.items()}
+            # Keep the last 'overlap' notes of the previous chunk as context.
+            # Exclude the additive side channels (pad_prob, raw_*) — they are not decoder
+            # input streams and would break generate()'s start-token concatenation.
+            _ctx = {k: v for k, v in y_full.items()
+                    if k == 'pad' or (k != 'pad_prob' and not k.startswith('raw_'))}
+            y_hat_prev = {k: v[:, -overlap:] if k != 'pad' else v[:, -overlap:, 0] for k, v in _ctx.items()}
             with torch.autocast(device_type=device):
-                y_hat = model.generate(x=x_chunk, y=y_hat_prev, top_k=top_k, temperature=temperature, max_length=chunk, kv_cache=kv_cache)
+                y_hat = model.generate(x=x_chunk, y=y_hat_prev, top_k=top_k, temperature=temperature, max_length=chunk, kv_cache=kv_cache, head_overrides=head_overrides)
             y_hat = {k: v[:, overlap:] for k, v in y_hat.items()}
 
         if y_full is None:
