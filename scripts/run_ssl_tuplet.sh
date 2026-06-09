@@ -25,6 +25,14 @@ LOG="/root/$STAGE.log"
 
 [ -f "$MAN" ]  || { echo "MISSING manifest: $MAN"; exit 1; }
 [ -f "$INIT" ] || { echo "MISSING init ckpt: $INIT"; exit 1; }
+# Guard: --tuplet-gamma>0 silently NO-OPS unless the manifest carries a tuplet_rate column
+# (the dataset's `'tuplet_rate' in columns` check). Fail loudly so a "reshape" run can't
+# secretly degrade to a plain warm-start (this ambiguity affected ssl_reshape_g1/g2).
+if [ "$TUPLET_GAMMA" != "0.0" ] && [ "$TUPLET_GAMMA" != "0" ]; then
+  head -1 "$MAN" | grep -q "tuplet_rate" || {
+    echo "ERROR: --tuplet-gamma=$TUPLET_GAMMA but manifest has no 'tuplet_rate' column: $MAN"
+    echo "       Use MANIFEST=\$REPO/data/pairs_classical_clean_tuplrate.csv for reshape runs."; exit 1; }
+fi
 mkdir -p "$OUT"
 pkill -9 -f '[t]rain.py fit' 2>/dev/null; sleep 2
 export CUDA_VISIBLE_DEVICES=0

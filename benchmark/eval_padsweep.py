@@ -76,7 +76,20 @@ def main():
     ap.add_argument("--overlap", type=int, default=64)
     ap.add_argument("--chunk", type=int, default=512)
     ap.add_argument("--thresholds", default="0.60 0.55 0.50 0.45 0.40 0.35 0.30 0.25")
+    # Inference-time DURATION placement levers (A1 logit-adjust, A2 metrical prior)
+    ap.add_argument("--prior-path", default=None, help="torch dict from compute_duration_priors.py")
+    ap.add_argument("--dur-tau", type=float, default=0.0, help="A1: subtract tau*log(prior) from duration logits")
+    ap.add_argument("--dur-metrical-lambda", type=float, default=0.0, help="A2: add lambda*logP(dur|phase)")
     args = ap.parse_args()
+
+    dur_log_pi = dur_metrical = None
+    if args.prior_path and (args.dur_tau or args.dur_metrical_lambda):
+        _pri = torch.load(args.prior_path, map_location="cpu", weights_only=False)
+        if args.dur_tau:
+            dur_log_pi = _pri["log_pi_dur"]
+        if args.dur_metrical_lambda:
+            dur_metrical = _pri["log_p_dur_given_phase"]
+        print(f"[priors] {args.prior_path} tau={args.dur_tau} lambda={args.dur_metrical_lambda}", flush=True)
 
     thresholds = [float(t) for t in args.thresholds.split()]
     out_path = Path(args.out)
@@ -112,7 +125,9 @@ def main():
         rec = {k: p[k] for k in ("composer", "piece", "n_notes")}
         try:
             y_hat = infer(p["_x"], model, overlap=args.overlap, chunk=args.chunk,
-                          verbose=False, kv_cache=True)            # <-- generate ONCE
+                          verbose=False, kv_cache=True,             # <-- generate ONCE
+                          dur_log_pi=dur_log_pi, dur_tau=args.dur_tau,
+                          dur_metrical=dur_metrical, dur_metrical_lambda=args.dur_metrical_lambda)
             try:
                 gt = converter.parse(p["score"])
                 rec["gt_tuplets"], rec["gt_notes"] = count_tuplets(gt)

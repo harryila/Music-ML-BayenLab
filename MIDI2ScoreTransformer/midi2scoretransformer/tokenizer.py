@@ -34,6 +34,16 @@ class Downbeat:
 
 db_config = Downbeat.MEASURE_LENGTH
 
+# B2 (beat-relative): when enabled, the offset stream is re-expressed as WITHIN-QUARTER position
+# (offset mod 1.0 quarter) plus an integer `quarter_idx` (which quarter of the measure). This is
+# lossless by construction (integer/fractional split of the quarter-length offset — no time-signature
+# dependency) and concentrates triplet positions into common within-quarter buckets {8,16}, which is
+# the sample-efficiency win. Default OFF → byte-identical to the absolute within-measure grid.
+BEAT_RELATIVE = False
+PARAMS_BR = {
+    "offset": {"min": 0, "max": 1, "step_size": 1 / 24},      # within-quarter (25 buckets)
+    "quarter_idx": {"min": 0, "max": 24, "step_size": 1},      # which quarter (25 buckets)
+}
 PARAMS = {
     "offset": {"min": 0, "max": 6, "step_size": 1 / 24},
     "duration": {"min": 0, "max": 4, "step_size": 1 / 24},
@@ -367,6 +377,8 @@ class MultistreamTokenizer:
                         # print("Couldn't match", part_name)
             hand_stream = torch.tensor(hand_stream)
         mxl_stream  # keep stream for gc only
+        # NOTE: offset stays WITHIN-MEASURE here (and in the cache). The B2 within-quarter split
+        # is done in bucket_mxl (load-time), so the existing raw cache works unchanged.
         return {
             "offset": offset_stream,
             "downbeat": downbeat_stream,
@@ -387,7 +399,16 @@ class MultistreamTokenizer:
     def bucket_mxl(mxl_streams: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
         # Bucketing TODO: checkout bucketing
         # fmt: off
-        offset_stream = one_hot_bucketing(mxl_streams["offset"], **PARAMS["offset"])
+        if BEAT_RELATIVE:
+            # B2: split cached WITHIN-MEASURE offset into integer quarter_idx + within-quarter [0,1).
+            raw_off = mxl_streams["offset"]
+            raw_off = raw_off if isinstance(raw_off, torch.Tensor) else torch.tensor(raw_off)
+            q_idx = torch.floor(raw_off)
+            within_q = raw_off - q_idx
+            offset_stream = one_hot_bucketing(within_q, **PARAMS_BR["offset"])
+            quarter_idx_stream = one_hot_bucketing(q_idx, **PARAMS_BR["quarter_idx"])
+        else:
+            offset_stream = one_hot_bucketing(mxl_streams["offset"], **PARAMS["offset"])
         duration_stream = one_hot_bucketing(mxl_streams["duration"], **PARAMS["duration"])
         downbeat_stream = one_hot_bucketing(mxl_streams["downbeat"], **PARAMS["downbeat"])
         pitch_stream = one_hot_bucketing(mxl_streams["pitch"], 0, 127, 128)
@@ -405,7 +426,7 @@ class MultistreamTokenizer:
         # Slurs
         # Tuplets
         # Dots?
-        return {
+        out = {
             "offset": offset_stream.float(),
             "downbeat": downbeat_stream.float(),
             "duration": duration_stream.float(),
@@ -421,6 +442,9 @@ class MultistreamTokenizer:
             "hand": hand_stream.float(),
             "pad": torch.ones((offset_stream.shape[0],), dtype=torch.long),
         }
+        if BEAT_RELATIVE:
+            out["quarter_idx"] = quarter_idx_stream.float()
+        return out
 
     @staticmethod
     def tokenize_mxl(mxl_path: str) -> Dict[str, torch.Tensor]:
@@ -470,7 +494,13 @@ class MultistreamTokenizer:
         def _s(name):
             return token_dict.get("raw_" + name, token_dict[name])
         # fmt: off
-        offset_stream = one_hot_unbucketing(_s("offset")[mask], **PARAMS["offset"]).numpy().astype(float)
+        if "quarter_idx" in token_dict:
+            # B2: reconstruct within-measure offset = quarter_idx + within-quarter offset
+            within_q = one_hot_unbucketing(_s("offset")[mask], **PARAMS_BR["offset"]).numpy().astype(float)
+            q_idx = one_hot_unbucketing(_s("quarter_idx")[mask], **PARAMS_BR["quarter_idx"]).numpy().astype(float)
+            offset_stream = q_idx + within_q
+        else:
+            offset_stream = one_hot_unbucketing(_s("offset")[mask], **PARAMS["offset"]).numpy().astype(float)
         duration_stream = one_hot_unbucketing(_s("duration")[mask], **PARAMS["duration"]).numpy().astype(float)
         downbeat_stream = one_hot_unbucketing(_s("downbeat")[mask], **PARAMS["downbeat"]).numpy().astype(float)
         pitch_stream = one_hot_unbucketing(_s("pitch")[mask], 0, 127, 128).numpy().astype(int)

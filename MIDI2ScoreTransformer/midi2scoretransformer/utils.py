@@ -67,7 +67,9 @@ def quantize_path(path, model, **kwargs):
 
 
 def infer(x, model, overlap=64, chunk=512, verbose=True, kv_cache=True,
-          top_k: int = 1, temperature: float = 1.0, head_overrides=None) -> dict[str, torch.Tensor]:
+          top_k: int = 1, temperature: float = 1.0, head_overrides=None,
+          dur_log_pi=None, dur_tau: float = 0.0, dur_metrical=None,
+          dur_metrical_lambda: float = 0.0) -> dict[str, torch.Tensor]:
     single_example = x['pitch'].ndim == 2
     if single_example:
         x = {k: v.unsqueeze(0) for k, v in x.items()}
@@ -80,7 +82,8 @@ def infer(x, model, overlap=64, chunk=512, verbose=True, kv_cache=True,
             print("Infer", i, "/", x['pitch'].shape[1], end='\r')
         x_chunk = {k: v[:, i:i + chunk] for k, v in x.items()}
         if i == 0 or overlap == 0:  # No context required
-            y_hat = model.generate(x=x_chunk, top_k=top_k, temperature=temperature, max_length=chunk, kv_cache=kv_cache, head_overrides=head_overrides)
+            y_hat = model.generate(x=x_chunk, top_k=top_k, temperature=temperature, max_length=chunk, kv_cache=kv_cache, head_overrides=head_overrides,
+                                   dur_log_pi=dur_log_pi, dur_tau=dur_tau, dur_metrical=dur_metrical, dur_metrical_lambda=dur_metrical_lambda)
         else:
             # Keep the last 'overlap' notes of the previous chunk as context.
             # Exclude the additive side channels (pad_prob, raw_*) — they are not decoder
@@ -89,7 +92,8 @@ def infer(x, model, overlap=64, chunk=512, verbose=True, kv_cache=True,
                     if k == 'pad' or (k != 'pad_prob' and not k.startswith('raw_'))}
             y_hat_prev = {k: v[:, -overlap:] if k != 'pad' else v[:, -overlap:, 0] for k, v in _ctx.items()}
             with torch.autocast(device_type=device):
-                y_hat = model.generate(x=x_chunk, y=y_hat_prev, top_k=top_k, temperature=temperature, max_length=chunk, kv_cache=kv_cache, head_overrides=head_overrides)
+                y_hat = model.generate(x=x_chunk, y=y_hat_prev, top_k=top_k, temperature=temperature, max_length=chunk, kv_cache=kv_cache, head_overrides=head_overrides,
+                                       dur_log_pi=dur_log_pi, dur_tau=dur_tau, dur_metrical=dur_metrical, dur_metrical_lambda=dur_metrical_lambda)
             y_hat = {k: v[:, overlap:] for k, v in y_hat.items()}
 
         if y_full is None:

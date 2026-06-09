@@ -17,6 +17,9 @@ FEATURES = {
     "voice": {'vocab_size': 9, 'loss_weight': 0.3, 'ignore_index': 0, 'min': 0, 'max': 8},
     "stem": {'vocab_size': 4, 'loss_weight': 0.2, 'ignore_index': 3, 'min': 0, 'max': 3},
     "hand": {'vocab_size': 3, 'loss_weight': 0.25, 'ignore_index': 2, 'min': 0, 'max': 2},
+    # B2 beat-relative: integer "which quarter of the measure" (paired with within-quarter offset).
+    # Only used when the model is built with use_beat_relative=True (else absent from target → loss skips).
+    "quarter_idx": {'vocab_size': 25, 'loss_weight': 0.25, 'ignore_index': -100, 'min': 0, 'max': 24, 'step_size': 1},
 }
 
 class MyModelConfig(RoFormerConfig):
@@ -45,6 +48,8 @@ class MyModelConfig(RoFormerConfig):
         is_autoregressive=False,
         positional_encoding="RoPE",
         conditional_sampling=False,
+        use_beat_relative=False,
+        out_quarter_idx_vocab_size=25,
         bias=True,
         **kwargs,
     ):
@@ -85,6 +90,13 @@ class MyModelConfig(RoFormerConfig):
         #     "stem": out_stem_vocab_size,
         #     "hand": out_hand_vocab_size,
         # }
+        # B2 beat-relative: offset head becomes WITHIN-QUARTER (25 buckets) + a new quarter_idx head (25).
+        # Default off → byte-identical. The in/out vocab for quarter_idx are equal (AR feeds back the one-hot).
+        self.use_beat_relative = use_beat_relative
+        self.out_quarter_idx_vocab_size = out_quarter_idx_vocab_size
+        self.in_quarter_idx_vocab_size = out_quarter_idx_vocab_size
+        if use_beat_relative:
+            self.out_offset_vocab_size = 25  # within-quarter (PARAMS_BR["offset"]: 0..1 @ 1/24)
         self.is_autoregressive = is_autoregressive
         assert positional_encoding in ["RoPE", "ALiBi", "absolute"]
         self.positional_encoding = positional_encoding

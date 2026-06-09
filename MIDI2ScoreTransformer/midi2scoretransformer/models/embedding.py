@@ -117,6 +117,8 @@ class MXLEmbeddings(nn.Module):
             "stem": nn.Linear(config.out_stem_vocab_size, config.embedding_size, bias=config.bias),
             "hand": nn.Linear(config.out_hand_vocab_size, config.embedding_size, bias=config.bias),
         })
+        if getattr(config, "use_beat_relative", False):  # B2: decoder-input embedding for quarter_idx
+            self.embeddings["quarter_idx"] = nn.Linear(config.out_quarter_idx_vocab_size, config.embedding_size, bias=config.bias)
         self.mask_embeddings = nn.Linear(1, config.embedding_size, bias=config.bias)
         self.layer_norm = nn.LayerNorm(config.embedding_size, eps=config.layer_norm_eps, bias=config.bias)
         self.dropout = nn.Dropout(config.hidden_dropout_prob)
@@ -175,6 +177,8 @@ class MXLUnembeddings(nn.Module):
             "stem": nn.Linear(config.embedding_size, config.out_stem_vocab_size, bias=config.bias),
             "hand": nn.Linear(config.embedding_size, config.out_hand_vocab_size, bias=config.bias),
         })
+        if getattr(config, "use_beat_relative", False):  # B2: output head for quarter_idx
+            self.embeddings["quarter_idx"] = nn.Linear(config.embedding_size, config.out_quarter_idx_vocab_size, bias=config.bias)
         self.mask_embeddings = nn.Linear(config.embedding_size, 1, bias=config.bias)
 
         self.layer_norm = nn.LayerNorm(config.embedding_size, eps=config.layer_norm_eps, bias=config.bias)

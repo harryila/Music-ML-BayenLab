@@ -54,3 +54,13 @@ benchmark/pretrain_eval/
 .cursor/
 benchmark/decomp_work/
 benchmark/tier2_out/
+
+# Claude Code agent state (not project code)
+.claude/
+
+# Large regenerable corpus manifests (data lists w/ box paths; rebuild via scripts/make_pairs.py, build_*.py)
+data/pairs_classical_*_manifest.csv
+data/pairs_classical_*_tuplrate.csv
+data/pairs_st_merged_manifest.csv
+data/pairs_gentle5k_manifest.csv
+data/pdmx_*_subset.csv

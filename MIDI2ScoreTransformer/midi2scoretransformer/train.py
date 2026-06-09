@@ -105,8 +105,12 @@ class TrainableRoformer(Roformer):
     def set_teacher(self, teacher: "TrainableRoformer", weight: float, temp: float = 2.0,
                     free_streams: tuple = ()):
         """Attach a FROZEN teacher for learning-without-forgetting distillation.
-        Stored as a plain attribute (not a submodule) so it is neither trained nor saved
-        into the student checkpoint. Moved to device in on_fit_start.
+        NOTE: assigning an nn.Module to self._teacher AUTO-REGISTERS it as a submodule
+        (nn.Module.__setattr__). We rely on that: on_fit_start moves it to device, and
+        on_save_checkpoint explicitly strips the `_teacher.*` keys so it is not saved (which
+        would break strict eval-time loading). It is never *trained* because we freeze its
+        params below (requires_grad_(False)), so the optimizer's param list excludes it.
+        Do NOT "fix" this into a plain attribute — that would break the device move + strip.
 
         free_streams: stream names EXCLUDED from the distill anchor (the student may relearn
         them freely). For the tuplet/meter task, set {"duration","offset","downbeat"} so the
@@ -355,6 +359,7 @@ class TrainableRoformer(Roformer):
 
 def _new_model(learning_rate: float = 3e-4, total_steps: int = 40000,
                warmup_steps: int = 1000, autoregressive: bool = False,
+               use_beat_relative: bool = False,
                **kwargs) -> TrainableRoformer:
     """Create a fresh model matching the released checkpoint's architecture.
     If autoregressive=True, the DECODER is causal (standard AR generation, which trains
@@ -374,6 +379,7 @@ def _new_model(learning_rate: float = 3e-4, total_steps: int = 40000,
         embedding_size=512, hidden_dropout_prob=0.1,
         attention_probs_dropout_prob=0.1, layer_norm_eps=1e-12,
         rotary_value=False, positional_encoding="RoPE",
+        use_beat_relative=use_beat_relative,  # B2: within-quarter offset + quarter_idx head
     )
     hp = {
         "components": ["encoder", "decoder"],
@@ -390,15 +396,26 @@ def _new_model(learning_rate: float = 3e-4, total_steps: int = 40000,
 
 
 def load_pretrained_init(ckpt_path: Optional[str] = None,
-                         use_beat_conditioning: bool = False):
+                         use_beat_conditioning: bool = False,
+                         use_beat_relative: bool = False):
     """Initialise from a released checkpoint (warm-start). If use_beat_conditioning,
-    add a zero-init 'beat' input Linear on the encoder (byte-identical to baseline)."""
+    add a zero-init 'beat' input Linear on the encoder (byte-identical to baseline).
+    If use_beat_relative (B2), the decoder offset head becomes within-quarter (25) and a new
+    quarter_idx head is added; the offset/quarter_idx params are SHAPE-MISMATCHED vs the base
+    ckpt, so we load only matching-shape keys (those heads keep fresh init, body warm-starts)."""
     if ckpt_path is None or not os.path.exists(ckpt_path):
         return None
     base = Roformer.load_from_checkpoint(ckpt_path, map_location="cpu", weights_only=False)
     enc = base.enc_config
     dec = base.dec_config
     hp = base.hyperparameters
+    if use_beat_relative:
+        dec.use_beat_relative = True
+        dec.out_offset_vocab_size = 25  # within-quarter
+        if not hasattr(dec, "out_quarter_idx_vocab_size"):
+            dec.out_quarter_idx_vocab_size = 25
+        if not hasattr(dec, "in_quarter_idx_vocab_size"):
+            dec.in_quarter_idx_vocab_size = 25
     if use_beat_conditioning:
         # Enable the beat input on the ENCODER only (the MIDI side). The released
         # checkpoint lacks the 'beat' Linear; build it fresh, load the rest via
@@ -408,7 +425,15 @@ def load_pretrained_init(ckpt_path: Optional[str] = None,
         if not hasattr(enc, "in_beat_vocab_size"):
             enc.in_beat_vocab_size = 13
     model = TrainableRoformer(enc_configuration=enc, dec_configuration=dec, hyperparameters=hp)
-    model.load_state_dict(base.state_dict(), strict=False)
+    # Shape-filtered warm-start: strict=False still ERRORS on shape mismatch, so drop keys whose
+    # shapes differ (B2's offset head 145->25) or are absent in base (quarter_idx) -> fresh init.
+    _bsd = base.state_dict(); _msd = model.state_dict()
+    _filtered = {k: v for k, v in _bsd.items() if k in _msd and _msd[k].shape == v.shape}
+    _reinit = sorted(set(_msd) - set(_filtered))
+    if use_beat_relative:
+        logging.getLogger(__name__).info("B2 warm-start: loaded %d/%d params; fresh-init %d (offset/quarter_idx): %s",
+                                         len(_filtered), len(_msd), len(_reinit), _reinit[:6])
+    model.load_state_dict(_filtered, strict=False)
     if use_beat_conditioning:
         with torch.no_grad():
             emb = model.embeddings_enc.embeddings["beat"]
@@ -640,7 +665,11 @@ def fit(stage: str, manifest_csv: str, learning_rate: float, max_epochs: int,
         distill_temp: float = 2.0, distill_free: tuple = (),
         decoder_full_drop: float = 0.0, autoregressive: bool = False,
         warmup_steps: int = -1, tuplet_weight: float = 1.0,
-        tuplet_gamma: float = 0.0) -> str:
+        tuplet_gamma: float = 0.0, use_beat_relative: bool = False) -> str:
+    if use_beat_relative:
+        import tokenizer as _tk
+        _tk.BEAT_RELATIVE = True
+        log.info("B2 beat-relative tokenization ENABLED (within-quarter offset + quarter_idx head)")
     if dataset_type == "asap":
         train_loader, val_loader = make_asap_loaders(
             seq_length, batch_size, num_workers, data_dir=data_dir,
@@ -666,11 +695,11 @@ def fit(stage: str, manifest_csv: str, learning_rate: float, max_epochs: int,
     _warmup = warmup_steps if (warmup_steps and warmup_steps > 0) else max(100, total_steps // 50)
     log.info("LR schedule: warmup=%d total_steps=%d (cosine)", _warmup, total_steps)
     if init_ckpt and os.path.exists(init_ckpt):
-        model = load_pretrained_init(init_ckpt, use_beat_conditioning=use_beat_conditioning)
+        model = load_pretrained_init(init_ckpt, use_beat_conditioning=use_beat_conditioning, use_beat_relative=use_beat_relative)
         if model is None:
             model = _new_model(learning_rate=learning_rate,
                                warmup_steps=_warmup,
-                               total_steps=total_steps, autoregressive=autoregressive)
+                               total_steps=total_steps, autoregressive=autoregressive, use_beat_relative=use_beat_relative)
         else:
             model._lr = learning_rate
             model._warmup_steps = _warmup
@@ -678,7 +707,7 @@ def fit(stage: str, manifest_csv: str, learning_rate: float, max_epochs: int,
     else:
         model = _new_model(learning_rate=learning_rate,
                            warmup_steps=_warmup,
-                           total_steps=total_steps, autoregressive=autoregressive)
+                           total_steps=total_steps, autoregressive=autoregressive, use_beat_relative=use_beat_relative)
     if autoregressive:
         log.info("AUTOREGRESSIVE (causal decoder) from-scratch training ON")
 
@@ -769,6 +798,9 @@ def main() -> None:
     p.add_argument("--tuplet-gamma", type=float, default=0.0,
                    help="RESHAPE: upweight tuplet-rich unpaired scores in resampling by "
                         "(tuplet_rate+floor)^gamma (needs a tuplet_rate manifest column). 0 = off.")
+    p.add_argument("--beat-relative", action="store_true",
+                   help="B2: within-quarter offset + a quarter_idx head (triplets become common "
+                        "within-quarter buckets). Sets tokenizer.BEAT_RELATIVE + use_beat_relative.")
     p.add_argument("--init-ckpt", default=None)
     p.add_argument("--out-dir", default="checkpoints")
     p.add_argument("--batch-size", type=int, default=8)
@@ -813,7 +845,7 @@ def main() -> None:
                    distill_temp=args.distill_temp, distill_free=tuple(args.distill_free),
                    decoder_full_drop=args.decoder_full_drop, autoregressive=args.autoregressive,
                    warmup_steps=args.warmup_steps, tuplet_weight=args.tuplet_weight,
-                   tuplet_gamma=args.tuplet_gamma)
+                   tuplet_gamma=args.tuplet_gamma, use_beat_relative=args.beat_relative)
         print(f"Best ckpt: {ckpt}")
 
 

@@ -30,7 +30,8 @@ class BaseModel(pl.LightningModule):
         )
 
     @torch.no_grad()
-    def generate(self, x, y=None, max_length=512, temperature=1.0, top_k=1, kv_cache=False, head_overrides=None) -> dict[str, torch.Tensor]:
+    def generate(self, x, y=None, max_length=512, temperature=1.0, top_k=1, kv_cache=False, head_overrides=None,
+                 dur_log_pi=None, dur_tau=0.0, dur_metrical=None, dur_metrical_lambda=0.0) -> dict[str, torch.Tensor]:
         """Generate a sequence of tokens from the model.
         If y with T timesteps is provided, only max_length - T tokens will be generated.
         The first T tokens will be y_hist.
@@ -56,6 +57,8 @@ class BaseModel(pl.LightningModule):
             "hand": torch.zeros((B, 1, conf.out_hand_vocab_size), device=device),
             "pad": torch.zeros((B, 1), device=device).long(),
         }
+        if getattr(conf, "use_beat_relative", False):  # B2: quarter_idx output stream
+            y_start_token["quarter_idx"] = torch.zeros((B, 1, conf.out_quarter_idx_vocab_size), device=device)
         # fmt: on
         if "encoder" in self.hyperparameters["components"]:
             encoder_hidden_states = self.forward_enc(
@@ -107,6 +110,19 @@ class BaseModel(pl.LightningModule):
                 logits = y_pred[k]
                 # pluck the logits at the final step and scale by desired temperature
                 logits = logits[:, -1, :] / _temp
+                # --- Inference-time DURATION placement levers (default off = byte-identical) ---
+                if k == "duration":
+                    # A1 (Menon logit-adjustment): subtract tau*log(prior) so rare tuplet
+                    # durations clear the decision boundary only where evidence supports them.
+                    if dur_log_pi is not None and dur_tau:
+                        logits = logits - dur_tau * dur_log_pi.to(logits.device)
+                    # A2 (Shibata metrical prior): add lambda*log P(duration | metrical phase),
+                    # phase = this step's offset bucket % 24 (already generated this step). Makes
+                    # tuplet durations cheap only at triplet sub-beats, expensive at binary ones.
+                    if dur_metrical is not None and dur_metrical_lambda:
+                        n_phase = dur_metrical.shape[0]
+                        phase = (y["offset"][:, -1].argmax(-1) % n_phase)  # (B,)
+                        logits = logits + dur_metrical_lambda * dur_metrical.to(logits.device)[phase]
                 # ensure that we sample a downbeat wherever the offset decreases, since that guarantees a measure change!
                 if k == "downbeat" and y["offset"].shape[1] > 1:
                     is_downbeat = y_pred["offset"][:, -1].argmax(-1) < y["offset"][:, -2].argmax(-1)
