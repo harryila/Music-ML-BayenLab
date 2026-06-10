@@ -10,6 +10,7 @@ For every slide you get three things:
 - **🖼️ ON SLIDE** — exactly what to put on the slide (title + bullets + visuals).
 - **🎙️ SAY (verbatim)** — a word-for-word script you can read or paraphrase.
 - **🗣️ WHO** — which of you speaks it.
+- **🔬 TECH POCKET** — an *optional* ~10-second technical aside for the engineers in the room (Prof. Bayen). They're self-contained: **skip them** if the room is non-technical or you're tight on time, **drop one in** if you see people leaning forward. Deeper material lives in **Appendix D — Technical backup slides** (pull up only if asked in Q&A).
 
 Three **🔴 DEMO** blocks are scripted with setup, the live steps, and a pre-recorded fallback.
 
@@ -104,6 +105,9 @@ Three **🔴 DEMO** blocks are scripted with setup, the live steps, and a pre-re
 **🎙️ SAY (Antoine):**
 > "The core design is the tokenizer. Instead of one giant vocabulary, I represent each musical event as a **compound token** — fourteen parallel 'heads', each describing one dimension: what type of event, its duration, its pitch, ornament, articulation, which **hand** plays it, beaming, dynamics, pedal, tempo. The model predicts all fourteen at once. I work in **kern**, a compact text format for notation with a big ready-made corpus. Remember this 'fourteen parallel heads' idea — it's going to show up again on Harry's side."
 
+**🔬 TECH POCKET** *(optional, ~10s — for the technical crowd)*
+> "Technically: each event is **14 categorical heads predicted jointly**, and the whole vocabulary across all heads is only a *few hundred* tokens — versus 20,000-plus for raw kern. That compression is why an entire piece fits in a 2,048-token context window."
+
 ---
 
 ## Slide 1.3 — The Model
@@ -117,6 +121,9 @@ Three **🔴 DEMO** blocks are scripted with setup, the live steps, and a pre-re
 
 **🎙️ SAY (Antoine):**
 > "The model is a ~16-million-parameter Transformer with rotary position encoding. The clever bit is **cascaded decoding in three stages** — it first decides *what kind* of event this is, then the core attributes like pitch and duration, then the fine ornaments *conditioned* on those — because, musically, a trill only makes sense once you know the note's length. And it explicitly tracks which hand is playing. It's gone through three generations: v1 proved the concept, v2 — training right now — adds pedaling, tempo, and richer conditioning, and v3 experiments with compressing whole chords into single tokens."
+
+**🔬 TECH POCKET** *(optional, ~10s)*
+> "The three stages model the *conditional dependencies between attributes* explicitly — ornaments are predicted **conditioned on** the already-decided duration and pitch, not as if the 14 heads were independent. Mechanically the embedding concatenates all 14 head-vectors and projects them down: `concat(14 × 320) → 320`."
 
 ---
 
@@ -188,6 +195,9 @@ python gen_and_convert.py \
 **🎙️ SAY (Harry):**
 > "The system is two blocks. Block 1, audio to MIDI — *which notes were played and when*. I integrated four state-of-the-art transcribers; the best is Sony's hFT-Transformer at about 97% note accuracy. Block 2, MIDI to score — *how do you write those notes down correctly* — uses the MIDI2ScoreTransformer from Beyer and Dai's 2024 paper. And here's a name you'll recognize: that paper's lead author co-founded **Songscription**, the 'Shazam for sheet music' startup. So Block 2 is literally the engine a commercial product runs on — which makes it a great, honest yardstick."
 
+**🔬 TECH POCKET** *(optional, ~10s)*
+> "One detail the engineers will like: we added a path that hands the transcriber's **float-precision note events straight into the score model**, skipping the MIDI-file round-trip and its re-quantization. Since the whole task is *about* timing, not throwing timing precision away matters."
+
 ---
 
 ## Slide 2.3 — Result #1: we reproduced the state of the art
@@ -198,6 +208,9 @@ python gen_and_convert.py \
 
 **🎙️ SAY (Harry):**
 > "First thing I did was reproduce their result, because you can't improve what you can't measure. On the standard benchmark — 59 performances, the MUSTER error metric — we hit **11.18**, versus their **11.30**. That's within noise. It means our evaluation is trustworthy, and every number after this is measured against a baseline I actually reproduced, not a number from a paper."
+
+**🔬 TECH POCKET** *(optional, ~10s — the rigor)*
+> "Two rigor notes. MUSTER is a **C++ aligner** that does a global note-to-note match between two MusicXMLs — so it scores *notation*, not just note counts. And a real gotcha: on Apple Silicon the **MPS backend silently produces degenerate outputs**, so the eval has to run on CPU. Finding that is part of why the 11.18 is trustworthy."
 
 ---
 
@@ -223,6 +236,9 @@ python gen_and_convert.py \
 **🎙️ SAY (Harry):**
 > "When the music gets dense — late-Romantic, virtuoso — the pipeline breaks, and I spent a long time finding out exactly where. Two surprises. One: it's **not the transcriber**. I fed the model *perfect* ground-truth MIDI and it failed the same way — so Block 1 is fine. Two: it's **not pitch** — the notes are right. The failure is **rhythm**: specifically **triplets and tuplets** — notes that sit *between* the obvious beats. On a piece that's half tuplets, the model produces only about half the tuplets it should, which forces every note onto a straight grid, which makes it invent the wrong time signature, which inflates the measure count by 70%, and the whole alignment falls apart. Pitch-perfect, rhythm-broken."
 
+**🔬 TECH POCKET** *(optional, ~10s — the mechanical root, the best one to use)*
+> "Here's the mechanism. The rhythm grid is **one twenty-fourth of a quarter note**. Dyadic values land on multiples of three — a quarter is 24, an eighth is 12 — and triplets land *off* them, at 8 and 16. So 'is this a triplet' becomes 'is this onset on a non-multiple-of-three bucket,' and those buckets are individually **rare** in the data. The model learns to never bet on them."
+
 ---
 
 ## Slide 2.6 — The deep finding (the science)
@@ -238,6 +254,9 @@ python gen_and_convert.py \
 
 **🎙️ SAY (Harry):**
 > "So I went deep — and this is the part I'm proudest of, even though it's a *negative* result, because it's careful. I built a diagnostic: what fraction of notes does the model place at triplet positions? Ground truth is about 5%. Then I tried to fix it from every angle — reshaping the data, self-training, a brand-new tuplet-aware representation, cranking the loss, even rebuilding the data engine and training from scratch on 23,000 paired pieces where a quarter of the targets were explicitly triplets. The lever that *over*-shot hit 20% — wrong rate, worse score. Everything else under-shot or collapsed to zero. **Nothing hit the *correct* rate.** We matched the released model's validation loss and got within about a point of its benchmark — but never its correct-rate placement. The leading explanation is the **data**: our corpus is only about 2% tuplets. So this isn't a dead end — it's a *data problem*, which tells us exactly what to fix, and it's the strongest argument for just *using* the released model as our engine."
+
+**🔬 TECH POCKET** *(optional, ~10s — the representation fix)*
+> "The fix I built — call it B2 — re-expresses an onset as **within-quarter position plus an integer quarter-index**, so a triplet becomes the *same* common bucket in every beat. I proved that recoding is **lossless** and concentrates **100% of triplets into shared buckets**. And the model *still* wouldn't learn them without the data — which is precisely how we know the representation is necessary but not sufficient."
 
 > **[CUT-FOR-SHORT]** *you can compress 2.5 + 2.6 into one slide if time is tight; keep the "0% placement, tried everything" punchline.*
 
@@ -276,6 +295,9 @@ python transcribe.py benchmark/chopin_op10/audio/Op10_No4_CsharpMinor.wav \
 
 **🎙️ SAY (Antoine):**
 > "And we both hit the *same wall*: rhythm and notation fidelity. My generation has to get tuplets, voices, and hands right; Harry's transcription dies on exactly those. The hard problem isn't generation versus transcription — it's the **representation of notation** sitting underneath both."
+
+**🔬 TECH POCKET** *(optional, ~10s — the deepest convergence; great for an engineering audience)*
+> "And it goes one layer deeper than the tokens. **Both models are rotary-position transformers** — Antoine's CWT and the MIDI2ScoreTransformer are *both* RoFormers, the same positional encoding. So it's compound multi-head tokens **and** RoPE, chosen independently on both sides — two people rediscovering the same recipe."
 
 ---
 
@@ -409,3 +431,29 @@ python transcribe.py benchmark/chopin_op10/audio/Op10_No4_CsharpMinor.wav \
 - **Songscription** = audio/recording (or YouTube) → editable sheet music/MIDI/MusicXML; freemium; based on the Beyer & Dai architecture.
 - **hFT-Transformer** = Sony, ISMIR 2023, ~96.7% onset-F1; best of the four transcribers we integrated.
 - **Antoine's v2** is mid-training — **confirm the latest epoch/loss the morning of the talk** before quoting.
+
+---
+
+# ═══════════════════════════════════════════
+# APPENDIX D — TECHNICAL BACKUP SLIDES (pull up only if asked in Q&A)
+# ═══════════════════════════════════════════
+*Not part of the main flow. These are the "go deeper" slides for an engineering audience — have them ready as hidden slides.*
+
+## D1 — The two tokenizers, side by side (the convergence, in full)
+- **Antoine — CWT, 14 heads:** Type · Duration · Pitch(+octave+accidental) · Ornament · Articulation · Tie · Slur · Phrase · Voicing(stem) · Beam · **Hand (RH/LH)** · Dynamic · Pedal · Tempo. Vocab ≈ a few hundred tokens; embedding `concat(14 × 320) → 320`; **RoPE**; 3-stage cascaded decode; ~16.2M params; autoregressive.
+- **Harry — MIDI2ScoreTransformer, 13 streams + pad:** offset · downbeat · duration · pitch · accidental · keysignature · velocity · grace · trill · staccato · voice · stem · **hand** · + a `pad` gate stream. **RoFormer** enc-4 / dec-4, hidden 512, 8 heads, **~32.6M params**; non-autoregressive (bidirectional mask-predict).
+- **Shared, unplanned:** multi-head **compound tokens** + **RoPE**, on both sides. Both quantize rhythm on a grid and both must solve hand/voice assignment.
+
+## D2 — MUSTER, in detail
+- Python wrapper (`muster/muster.py`) around a **C++ aligner** over two MusicXMLs. Six error rates: PitchER, MissRate, ExtraRate, OnsetER, OffsetER → **MeanER** (their mean). Plus engraving sub-metrics (note spelling, voice assignment, stem direction, staff assignment) and voice P/R/F1. **Aborts on 3-staff scores** (limits OOD eval to 2-staff). Our 11.18 matched the paper on *all five* sub-metrics within 0.12.
+
+## D3 — The 1/24 grid + the placement diagnostic
+- Grid = **1/24 of a quarter note**. Dyadic = multiples of 3 (quarter 24, eighth 12, 16th 6); triplet/sextuplet = off-multiples (8, 16, 4, 20). `diag_offset_phase.py` measures the fraction of onsets at triplet phases: **GT ≈ 4.78%, our models 0%**.
+- **B2** = within-quarter offset + integer `quarter_idx`. Verified: **lossless** round-trip, **100%** triplet concentration into shared buckets, non-B2 byte-identical. Conclusion: representation **necessary, not sufficient**.
+
+## D4 — The exhaustive placement matrix + the data engine
+- Inference cleanup → 11.79→**11.41** (only robust gain); global logit-shift → over-emits; corpus reshape → **19.9%** (over-shoots, regresses); self-training → 0.9%; tuplet-weight ×5 → 0%; B2 → 0%; paired distillation (2.87% targets) → 0%; rendered paired (**24.73%** targets) → 0% (undertrained); from-scratch AR (val 1.3, undertrained) + non-AR (matched val 0.51, within ~1 MUSTER pt) → 0%.
+- **Data engine:** 23,780 PDMX scores rendered → valid per-beat-aligned paired data in ~11 min; tuplet-rich subset carries 24.73% placement.
+
+## D5 — Eval-harness rigor (why the numbers are real)
+- **MPS→CPU:** Apple-MPS produced degenerate pad logits → eval forced to CPU. **val ≠ MUSTER:** we re-rank checkpoints by *true* MUSTER (`rerank_by_muster.sh`), not loss. **Leakage audit:** 12/17 eval pieces found in PDMX via *content fingerprints* (transposition-invariant interval n-grams, not titles) → content-dedup tool + blocklist for any future PDMX training. **Pad-threshold bug:** the released `generate()` hard-argmaxed `pad` to binary, making any threshold a no-op — we fixed it (continuous keep-probability + un-zeroed raw streams).
