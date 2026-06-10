@@ -64,3 +64,6 @@ data/pairs_classical_*_tuplrate.csv
 data/pairs_st_merged_manifest.csv
 data/pairs_gentle5k_manifest.csv
 data/pdmx_*_subset.csv
+
+# Logs (regenerable; keep out of git)
+*.log

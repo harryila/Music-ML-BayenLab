@@ -1,200 +1,94 @@
-# Piano Audio → Sheet Music Pipeline
+# Music-ML (Bayen Lab) — Piano Performance → Engraved Score
 
-Transcribes piano audio recordings into rendered sheet music. The pipeline has
-two configurable phases:
+A research project on turning a piano **performance** (audio or MIDI) into a correct **engraved score** (MusicXML / sheet music), as accurately as possible — the *transcription/notation* half of the lab's larger goal (natural language → score).
 
-**Phase 1 — Audio to MIDI** (choose one transcriber):
+> **📄 Start here:** [`LAB_REPORT_COMPLETE.md`](LAB_REPORT_COMPLETE.md) — the complete, canonical lab report (every component, the design choices, the research finding, and how it fits the lab's direction).
+> **🎤 Presentation:** [`LAB_PRESENTATION_SCRIPT.md`](LAB_PRESENTATION_SCRIPT.md) — the joint lab-talk script (this work + the generative side).
 
-- **basic-pitch** — [Spotify Basic Pitch](https://github.com/spotify/basic-pitch) CNN (default)
-- **mt3** — [Google MT3](https://github.com/magenta/mt3) T5 Transformer (ISMIR 2021, requires venv_mt3)
-- **transkun** — [Transkun](https://github.com/Yujia-Yan/Transkun) event-based, fully continuous timestamps
-- **hft** — [hFT-Transformer](https://github.com/sony/hFT-Transformer) hierarchical Transformer (ISMIR 2023, sub-frame precision)
+---
 
-**Phase 2+3 — MIDI to Score to PDF** (choose one backend):
+## Headline results
 
-- **music21** — rule-based heuristics, rendered via [LilyPond](https://lilypond.org)
-- **musescore** — [MuseScore](https://musescore.org) CLI MIDI import + rendering
-- **transformer** — [MIDI2ScoreTransformer](https://github.com/TimFelixBeyer/MIDI2ScoreTransformer)
-  neural model (ISMIR 2024), rendered via MuseScore
+- **Reproduced the published SOTA to within noise** — MeanER **11.18** vs the paper's **11.30** (Beyer & Dai, *MIDI2ScoreTransformer*, ISMIR 2024) on the 59-performance ASAP test set. This validates the whole eval harness, so every other number is measured against a real reproduction. → [`benchmark/BASELINE_RESULTS.md`](benchmark/BASELINE_RESULTS.md)
+- **On clean, in-distribution piano the full audio→score pipeline scores ~2.75 MeanER** — i.e. it **matches commercial quality on easy repertoire**, which is expected because the Block-2 score model is the same open released checkpoint that **Songscription** is built on. (2.75 is the easy end of the difficulty range; the apples-to-apples number is the 11.18 reproduction.) → [`docs/reports/SONGSCRIPTION_PARITY.md`](docs/reports/SONGSCRIPTION_PARITY.md)
+- **The accuracy ceiling is rhythm, not the transcriber and not pitch.** Stage decomposition shows feeding *perfect* MIDI into Block 2 fails the same way as full audio→score (Block 1 is ~95–97% correct). The notes are right; **triplet/tuplet onset placement** is where it breaks on dense Romantic music. → [`benchmark/DECOMPOSED_FINDINGS.md`](benchmark/DECOMPOSED_FINDINGS.md)
+- **Core research finding (carefully stated):** across a broad matrix of data, representation, loss, and training schemes, **no lever achieved correct-*rate* triplet placement** (corpus reshaping *over*-shot to 19.9%; everything else under-shot or collapsed). We matched the released model's validation loss and came within ~1 MUSTER point, but never its correct-rate placement. **The leading, best-supported explanation is the training data** (our corpus is ~1.7% tuplets); the decisive converged-on-tuplet-rich-data run was left undertrained, so this is *"not recovered within our compute/data budget,"* not a proof of impossibility. → [`LAB_REPORT_COMPLETE.md` §7](LAB_REPORT_COMPLETE.md)
+- **Strategic takeaway:** use the released model as the **placement-capable engine** and as a **data engine** (transcription manufactures score corpora to pretrain the generative side); own the shared **music-notation representation**. → [`LAB_REPORT_COMPLETE.md` §9](LAB_REPORT_COMPLETE.md)
 
-Best pipeline: **hFT → MIDI2ScoreTransformer** (both run in venv311, with direct
-note handoff bypassing the MIDI file round-trip).
+---
 
-## Setup
+## The system: two blocks
 
-### 1. Python environment
+```
+ AUDIO ──[ Block 1: transcription ]──► performance MIDI ──[ Block 2: notation ]──► MusicXML ──► PDF
+        Basic Pitch / hFT / MT3 / Transkun        MIDI2ScoreTransformer (Beyer & Dai)     MuseScore
+```
 
-Requires Python 3.11 for the transformer backend, hFT, and Transkun.
+- **Block 1 (audio → MIDI)** is solved-enough: off-the-shelf transcribers recover ~95–97% of notes. Best: **hFT-Transformer** (Sony, ISMIR 2023, 96.72% onset-F1). We proved this is **not** the bottleneck and deliberately stopped optimizing it.
+- **Block 2 (MIDI → score)** is the hard, interesting problem and where the whole accuracy ceiling lives — see the research finding above.
 
+Full eval harness, the tuplet-placement investigation, and all design choices are documented in [`LAB_REPORT_COMPLETE.md`](LAB_REPORT_COMPLETE.md).
+
+---
+
+## Repository map
+
+```
+LAB_REPORT_COMPLETE.md      ← canonical lab report (read this first)
+LAB_PRESENTATION_SCRIPT.md  ← joint lab-presentation script
+transcribe.py               ← pipeline CLI entry point
+MIDI2ScoreTransformer/      ← Block 2 model + our training stack (train.py is ours; upstream ships inference only)
+hFT-Transformer/ , mt3/     ← Block 1 transcribers (checkpoints downloaded separately)
+benchmark/                  ← eval harness, MUSTER results, test pieces (BASELINE/DECOMPOSED/TRACKB results, LEAKAGE_AUDIT)
+scripts/                    ← data-engine builders, B2 tokenizer, diagnostics, MUSTER rerank
+docs/
+  reports/                  ← topic reports & roadmaps (SONGSCRIPTION_PARITY, AUDIO_SCORE_ROADMAP, DATA_SCALING_DERISK, …)
+  sessions/                 ← dated session logs / morning reports (provenance of the autonomous runs)
+  archive/                  ← raw dumps & intermediate JSONs (kept for reference, not canonical)
+```
+
+---
+
+## Setup & usage
+
+### 1. Python environment (Python 3.11)
 ```bash
-python3.11 -m venv venv311
-source venv311/bin/activate
+python3.11 -m venv venv311 && source venv311/bin/activate
 pip install -r requirements.txt
 pip install transkun torchcodec
+# Pins that matter: transformers==4.44.2, music21 9.x. MT3 needs a separate venv (JAX/TF) — see mt3_inference.py.
 ```
 
-MT3 requires a separate venv due to JAX/TensorFlow dependencies — see
-`mt3_inference.py` and `mt3/` for setup instructions.
+### 2. Model checkpoints (downloaded separately; gitignored)
+- **MIDI2ScoreTransformer** (`MIDI2ScoreTF.ckpt`): [releases](https://github.com/TimFelixBeyer/MIDI2ScoreTransformer/releases) → `MIDI2ScoreTransformer/checkpoints/`
+- **hFT-Transformer**: [ismir2023 release](https://github.com/sony/hFT-Transformer/releases/tag/ismir2023) → `hFT-Transformer/checkpoint/`
+- **MT3** (optional): `gs://mt3/checkpoints/ismir2021/` → `mt3/checkpoints/ismir2021/`
 
-### 2. Model checkpoints
+### 3. System deps
+`brew install lilypond` (music21 backend) · `brew install --cask musescore` (musescore/transformer backends).
 
-Download separately (not included in repo due to size):
-
-- **MIDI2ScoreTransformer**: Download `MIDI2ScoreTF.ckpt` from
-  [GitHub releases](https://github.com/TimFelixBeyer/MIDI2ScoreTransformer/releases)
-  into `MIDI2ScoreTransformer/checkpoints/`
-- **hFT-Transformer**: Download `checkpoint.zip` from
-  [GitHub releases](https://github.com/sony/hFT-Transformer/releases/tag/ismir2023),
-  unzip into `hFT-Transformer/checkpoint/`
-- **MT3**: Download from `gs://mt3/checkpoints/ismir2021/` into `mt3/checkpoints/ismir2021/`
-
-### 3. System dependencies
-
-**LilyPond** (for music21 backend):
+### Run it
 ```bash
-brew install lilypond          # macOS
-sudo apt-get install lilypond  # Linux
-```
-
-**MuseScore** (for musescore and transformer backends):
-```bash
-brew install --cask musescore  # macOS
-```
-
-## Usage
-
-```bash
-# Default: basic-pitch transcriber, music21 backend
-python transcribe.py samples/TwinkleTwinkle.mp3
-
-# Best pipeline: hFT transcriber + transformer backend
+# Best pipeline: hFT transcriber + neural (MIDI2ScoreTransformer) backend
 python transcribe.py samples/TwinkleTwinkle.mp3 -t hft -b transformer
 
-# Other transcribers
-python transcribe.py samples/TwinkleTwinkle.mp3 -t transkun -b musescore
-python transcribe.py samples/TwinkleTwinkle.mp3 -t mt3 -b transformer  # requires venv_mt3
-
-# Skip Phase 1 — use a pre-existing MIDI file directly
+# Skip transcription, score an existing MIDI directly
 python transcribe.py --midi-input midi/existing.mid -b transformer
+```
+Output defaults to `outputs/<backend>/<input_stem>.pdf`.
 
-# Tune Basic Pitch thresholds (higher = fewer false detections)
-python transcribe.py samples/TwinkleTwinkle.mp3 -t basic-pitch --onset-threshold 0.6 --frame-threshold 0.4
+- `-t / --transcriber`: `basic-pitch` (default) · `mt3` (needs `venv_mt3`) · `transkun` · **`hft`** (best)
+- `-b / --backend`: `music21` (default) · `musescore` · **`transformer`** (neural, 2-hand notation)
+
+### Evaluation
+```bash
+python benchmark/eval_tier1_asap.py     # paper-comparable MUSTER on the 59-perf ASAP test (CPU on macOS)
+python benchmark/eval_padsweep.py       # fast single-pass pad-threshold sweep (the "standing" measurement)
 ```
 
-Output defaults to `outputs/<backend>/<input_stem>.pdf` when `-o` is not given.
+---
 
-### Arguments
-
-| Argument | Description |
-|---|---|
-| `input` | Path to audio file (.wav, .mp3, .ogg, .flac, .m4a). Optional if `--midi-input` is used. |
-| `--midi-input` | Skip Phase 1 and use this MIDI file directly for Phase 2+3. |
-| `-o`, `--output` | Output file path. Extension sets format (.pdf or .png). Default: `outputs/<backend>/<input_stem>.pdf` |
-| `-m`, `--keep-midi` | Path for intermediate MIDI file. Default: `<input_stem>.mid` beside output |
-| `-t`, `--transcriber` | Audio-to-MIDI transcriber: `basic-pitch` (default), `mt3`, `transkun`, or `hft` |
-| `-b`, `--backend` | Score backend: `music21` (default), `musescore`, or `transformer` |
-| `--onset-threshold` | Basic Pitch onset threshold (0-1). Higher = fewer false onsets. Default: 0.5 |
-| `--frame-threshold` | Basic Pitch frame threshold (0-1). Higher = fewer phantom notes. Default: 0.3 |
-
-### Transcribers
-
-| | basic-pitch | mt3 | transkun | hft |
-|---|---|---|---|---|
-| Architecture | CNN | T5 Transformer | Event-based | Hierarchical Transformer |
-| Timing | Frame-level | 10ms grid | Continuous | Sub-frame (~1-2ms) |
-| Training data | General audio | MAESTRO | MAESTRO | MAESTRO V3 |
-| Onset F1 | — | ~96% | — | 96.72% |
-| Venv | any | venv_mt3 | venv311 | venv311 |
-
-### Backends
-
-| | music21 | musescore | transformer |
-|---|---|---|---|
-| Approach | Rule-based heuristics | MuseScore MIDI import | Neural seq2seq model |
-| Hand splitting | None (single part) | None (single part) | Learned (2 parts) |
-| Time sig | Inferred | MuseScore internal | Predicted (with majority-vote correction) |
-| Renderer | LilyPond | MuseScore | MuseScore |
-| System deps | LilyPond | MuseScore | MuseScore + PyTorch |
-
-## Project Structure
-
-```
-transcribe.py                CLI entry point — full pipeline
-mt3_inference.py             MT3 inference wrapper (JAX/T5X)
-samples/                     Input audio files
-midi/                        Intermediate MIDI files (gitignored, regenerable)
-outputs/                     Output PDFs/PNGs (gitignored, regenerable)
-MIDI2ScoreTransformer/       MIDI-to-score neural model (ISMIR 2024)
-  checkpoints/               Pre-trained weights (gitignored, download separately)
-  midi2scoretransformer/     Tokenizer, model, inference, score post-processing
-hFT-Transformer/             Audio-to-MIDI transcriber (ISMIR 2023)
-  checkpoint/                Pre-trained weights (gitignored, download separately)
-  model/                     AMT class, model architecture
-mt3/                         Audio-to-MIDI transcriber (ISMIR 2021)
-  checkpoints/               Pre-trained weights (gitignored, download separately)
-  mt3/                       T5X model, spectrograms, vocabularies
-benchmark/                   MAESTRO ground-truth benchmarking
-  maestro-v3.0.0.csv         Full dataset metadata (1276 pieces)
-  chopin_op10/               Catalog + GT MIDI for Chopin Études Op. 10
-  chopin_op25/               Catalog + GT MIDI for Chopin Études Op. 25
-  liszt_transcendental/      Catalog + GT MIDI for Liszt Transcendental Études
-IMPROVEMENTS.md              Full improvement catalog with priority matrix
-STATUS.md                    Complete implementation tracker
-```
-
-## Known Limitations
-
-### 1. Quantization
-
-MIDI stores raw timing (e.g., a note held for 0.48 beats). Score backends must
-snap this to a musical value (quarter note? dotted eighth?). Heuristics work
-well for metronomic playing but degrade with rubato or expressive timing.
-
-### 2. Staff splitting (left/right hand)
-
-Piano scores use treble and bass clef. MIDI has no hand assignment. The
-MIDI2ScoreTransformer backend handles this via a learned `hand` stream
-(correctly splits into 2 parts). The music21 and musescore backends produce
-only 1 part from single-track MIDI.
-
-### 3. Voice separation
-
-Within a single staff, multiple melodic lines must be separated into distinct
-voices for correct notation. MIDI2ScoreTransformer predicts a `voice` stream;
-music21 uses basic heuristics.
-
-### 4. Key and time signature inference
-
-MIDI files contain no key or time signature metadata. MIDI2ScoreTransformer
-predicts these per-note but can be noisy — a majority-vote post-correction
-overrides outlier time signatures. On ground-truth MAESTRO MIDI, the model
-gets time signature correct on simple pieces but struggles on complex ones
-(e.g. Liszt Mazeppa: predicted 3/4 instead of 4/4).
-
-### 5. Enharmonic spelling
-
-MIDI note 66 could be F# or Gb — the correct choice depends on harmonic
-context. MIDI2ScoreTransformer predicts accidentals per-note with constraints;
-music21 uses key-aware heuristics.
-
-### 6. Pedal interpretation
-
-Sustain pedal extends note durations in MIDI, but scores notate pedal markings
-separately. The pipeline does not distinguish pedaled sustain from written
-duration, which can produce excessively long tied notes.
-
-### 7. MIDI round-trip quantization
-
-Transcribers like hFT produce float-precision timestamps that get quantized to
-MIDI integer ticks when written via pretty_midi. The hFT + transformer pipeline
-bypasses this via direct note handoff (`tokenize_notes()`). MT3 still requires
-the MIDI file as a handoff between JAX and PyTorch venvs.
-
-## References
-
-- [MIDI2ScoreTransformer](https://github.com/TimFelixBeyer/MIDI2ScoreTransformer) — Beyer, ISMIR 2024
-- [hFT-Transformer](https://github.com/sony/hFT-Transformer) — Sony, ISMIR 2023
-- [MT3](https://github.com/magenta/mt3) — Hawthorne et al., ISMIR 2021 / ICLR 2022
-- [Transkun](https://github.com/Yujia-Yan/Transkun) — Yan & Duan, NeurIPS 2021 / ISMIR 2024
-- [Basic Pitch](https://github.com/spotify/basic-pitch) — Spotify
-- [MAESTRO Dataset](https://magenta.tensorflow.org/datasets/maestro) — Google Magenta
+## Key references
+- Beyer & Dai, *End-to-end Piano Performance-MIDI to Score Conversion with Transformers*, **ISMIR 2024** — [arXiv:2410.00210](https://arxiv.org/abs/2410.00210) · [code](https://github.com/TimFelixBeyer/MIDI2ScoreTransformer)
+- hFT-Transformer (Sony, ISMIR 2023) · Basic Pitch (Spotify) · MT3 (Google Magenta, ISMIR 2021) · Transkun
+- **Songscription** — the commercial audio→sheet-music product built on the Beyer & Dai architecture (co-founder Tim Beyer = the paper's lead author).
