@@ -180,7 +180,7 @@ Every cell below was measured with full-14 MUSTER **and** the placement diagnost
 | **From scratch** | AR causal (left **undertrained**, val 1.3) *and* non-AR masked-SSL (matched released val 0.51; within ~1 MUSTER pt) | 0% | — |
 
 ### 7.4 The two cleverest attempts, and why they still failed
-- **A2 metrical prior (the one durable win):** at decode time, boost durations consistent with the current onset phase (`+λ·log P(duration | offset-phase)`). It *cleans up* mis-placed tuplets and improved the best model 11.79 → 11.456 with **zero retraining**. But it's a cleanup lever — it removes wrong tuplets; it can't *create* correct placement, and it actually *hurts* the already-correct released model.
+- **A2 metrical prior (the one durable win):** at decode time, boost durations consistent with the current onset phase (`+λ·log P(duration | offset-phase)`). It *cleans up* mis-placed tuplets — **A2 alone takes the best model 11.79 → 11.456**, and stacked with the pad-threshold + per-head decoding the inference-best is **11.41**, all with **zero retraining**. But it's a cleanup lever — it removes wrong tuplets; it can't *create* correct placement, and it actually *hurts* the already-correct released model.
 - **B2 beat-relative tokenization (the literature's #1 structural fix):** we re-expressed onset as *within-quarter* position + an integer `quarter_idx`. This makes triplet onsets **common, shared buckets** {8,16} across all beats (so they should be sample-efficient to learn). We implemented it fully (lossless round-trip verified, 100% triplet concentration, non-B2 byte-identical, full model surgery + warm-start shape-filtering). **It still produced 0% placement.** The representation is *necessary but not sufficient* — it makes triplets *learnable* but doesn't make the model *learn* them.
 
 ### 7.5 The committed full-scale attempt (this session's finale)
@@ -205,12 +205,12 @@ We reproduced the released model's **architecture** and its **validation loss**,
 | Training stack (we wrote it) | ✅ working | SSL / mixed / paired; warm-start shape-filter |
 | Synthetic-jitter fine-tune (Track C) | ❌ negative | catastrophic forgetting (+6.9 MeanER); documented |
 | Inference tweaks A1/A4/A5 | ❌ negligible/unusable | A4 breaks the 512-token limit |
-| **A2 metrical prior** (inference) | ✅ **win** | 11.79 → 11.41, zero retraining |
+| **Inference levers** (A2 + pad-thr + per-head) | ✅ **win** | 11.79 → 11.41 stacked (A2 alone 11.456), zero retraining |
 | pad-threshold (we fixed a real no-op bug) | ✅ working | continuous keep-prob + raw streams |
 | **B2 beat-relative** representation | ✅ implemented, ❌ didn't fix placement | lossless, validated; representation ≠ sufficient |
 | Self-training / paired distillation | ✅ pipeline works, ❌ didn't fix placement | targets carry signal; model won't learn it |
-| Full-scale from-scratch reproduction | ✅ ran, ❌ didn't fix placement | the definitive negative |
-| **Triplet onset placement** | ❌ unreproducible by our means | the core finding |
+| Full-scale from-scratch reproduction | ✅ ran (undertrained), ❌ placement still 0% | the open cell — not a proof of impossibility |
+| **Triplet onset placement** | ❌ not reproduced within our budget | core finding; leading constraint = tuplet-poor data |
 
 ---
 

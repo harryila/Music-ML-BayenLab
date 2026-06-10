@@ -201,14 +201,14 @@ python gen_and_convert.py \
 
 ---
 
-## Slide 2.4 — Result #2: on clean piano, we beat the product
+## Slide 2.4 — Result #2: on clean piano, commercial quality
 **🖼️ ON SLIDE**
-- Title: **Clean piano: end-to-end MeanER 2.75**
+- Title: **Clean piano: end-to-end MeanER ≈ 2.75 — commercial quality**
 - Side-by-side: a Chopin étude audio clip → our rendered score.
-- Honest caveat in small text: *"2.75 is the easy, in-distribution end (clean solo études). The hard Romantic repertoire is a different story — next slide."*
+- Honest caveat in small text: *"2.75 is the easy, in-distribution end (clean solo études) — **not** a like-for-like win over the product: the score model is the same open checkpoint Songscription runs, and the apples-to-apples number is the 11.18 reproduction. The hard Romantic repertoire is the next slide."*
 
 **🎙️ SAY (Harry):**
-> "On clean, in-distribution piano — Chopin études from clean recordings — our **full audio-to-score pipeline** scores **2.75**, far below that ~11 baseline. So on the music it's designed for, the pipeline is genuinely excellent — better than the general-purpose number the commercial engine reports. I want to be honest, though: 2.75 is the *easy* end of the repertoire. The interesting science is what happens on the *hard* end."
+> "On clean, in-distribution piano — Chopin études from clean recordings — our **full audio-to-score pipeline** scores about **2.75**. One honest caveat so nobody catches us: that's *not* a like-for-like win over Songscription. 2.75 is on easy, clean pieces, while the ~11 baseline is the full-test average across all fourteen composers — and the score model we run is the *same open checkpoint Songscription is built on*. So the fair claim is: **on clean piano, an open pipeline reaches commercial quality, because the score brain is the open part.** The apples-to-apples number is the 11.18 reproduction. The interesting science is the *hard* end — next slide."
 
 ---
 
@@ -229,11 +229,11 @@ python gen_and_convert.py \
 **🖼️ ON SLIDE**
 - Title: **Why is tuplet placement so hard? A careful answer.**
 - The diagnostic: the model places **0%** of notes at triplet positions on hard pieces (ground truth: ~4.8%).
-- A compact matrix (the thing that makes this a *result*, not a complaint): we tried **everything** and placement stayed **0%**:
-  - data (reshape, self-training, paired distillation w/ 24.7% triplet targets)
-  - representation (beat-relative tokenization)
-  - loss (tuplet-weighting ×5)
-  - training (warm-start *and* from-scratch; AR *and* non-AR)
+- A compact matrix (the thing that makes this a *result*, not a complaint): across every axis, **no lever hit the *correct* rate** — most collapsed to ~0%, one *over*-shot to 19.9% (still wrong):
+  - data (reshape → 19.9% over; self-training; paired distillation w/ 24.7% triplet targets → ~0%)
+  - representation (beat-relative tokenization → 0%)
+  - loss (tuplet-weighting ×5 → 0%)
+  - training (warm-start *and* from-scratch; AR *and* non-AR; the from-scratch run was **undertrained**)
 - Conclusion (boxed): *"We matched the released model's architecture and validation loss, and came within ~1 MUSTER point — but no lever hit **correct-rate** placement (reshaping over-shot to 19.9%; everything else under-shot). The leading explanation is the **data** — our corpus is ~1.7% tuplets. The decisive test (a tuplet-aware representation trained to convergence on tuplet-rich data) is still open, so this is 'not recovered within our budget,' not 'impossible.'"*
 
 **🎙️ SAY (Harry):**
@@ -403,7 +403,7 @@ python transcribe.py benchmark/chopin_op10/audio/Op10_No4_CsharpMinor.wav \
 # APPENDIX C — FACT-CHECK NOTES (so you don't get caught)
 # ═══════════════════════════════════════════
 - **MeanER 11.18 vs 11.30** — our reproduction vs the Beyer & Dai (ISMIR 2024) paper; verified, within noise. The "MUSTER" metric is the standard score-transcription error rate.
-- **"Beats Songscription's 11.30"** — frame carefully: 11.30 is the *paper's* number for the model **Songscription is built on** (co-founder Tim Beyer = the paper's lead author). Our **2.75** is on clean piano (easy subset), end-to-end. Don't imply Songscription *publishes* 11.30 — say "the released model / the engine it's built on."
+- **The Songscription comparison (now framed correctly in the slides):** 11.30 is the *paper's* number for the model **Songscription is built on** (co-founder Tim Beyer = the paper's lead author) — *not* a number Songscription publishes. Our **2.75** is on clean piano (easy subset), end-to-end, running that same open checkpoint — so the claim is **"matches commercial quality on clean piano," not "beats Songscription."** The apples-to-apples number is the 11.18 reproduction. If pushed, concede this proactively — it's the strongest move.
 - **CWT = Compound-Word Transformer** (Antoine's model), **not** Continuous Wavelet Transform. (If anyone asks: wavelets are an *audio* analysis tool; this is symbolic generation.)
 - **Lyria** = Google DeepMind **text → music *audio*** (not notation). Versions move fast — say "Lyria 2 (instrumental, via Vertex AI)" unless you're using the newer Lyria 3 / RealTime; confirm your access path before the talk.
 - **Songscription** = audio/recording (or YouTube) → editable sheet music/MIDI/MusicXML; freemium; based on the Beyer & Dai architecture.
